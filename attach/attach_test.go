@@ -1,0 +1,177 @@
+package attach
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/cnuss/tush/console"
+	"github.com/cnuss/tush/shell"
+)
+
+// The protocol prefixes every message with the channel it belongs to.
+const (
+	channelStdin  = 0
+	channelStdout = 1
+	channelResize = 4
+)
+
+// TestResizeReachesTheShell checks that a window size reported over the
+// protocol reaches the terminal, which is what full-screen programs read to
+// decide what shape to draw.
+func TestResizeReachesTheShell(t *testing.T) {
+	conn, screen := attachTo(t, startHost(t))
+
+	size, err := json.Marshal(struct{ Width, Height uint16 }{Width: 100, Height: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, conn, channelResize, size)
+	time.Sleep(200 * time.Millisecond)
+
+	// The marker is written so its echo differs from its output; a terminal
+	// echoes the typed line back on the same stream.
+	send(t, conn, channelStdin, []byte("stty si''ze\n"))
+	screen.waitFor(t, "40 100")
+}
+
+// TestSecondClientRefused checks that a client cannot attach on top of another
+// and steal half its session.
+func TestSecondClientRefused(t *testing.T) {
+	host := startHost(t)
+	attachTo(t, host)
+
+	conn, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
+		Subprotocols: []string{"v4.channel.k8s.io"},
+	})
+	if err != nil {
+		// Refused outright is a fine way to say no.
+		return
+	}
+	defer conn.CloseNow()
+
+	// Otherwise the session must end promptly rather than sharing the console.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.Read(t.Context()); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("second client was left attached alongside the first")
+	}
+}
+
+// startHost runs a console, a shell on it, and the attach endpoint, returning
+// the WebSocket address a client would dial.
+func startHost(t *testing.T) string {
+	t.Helper()
+	if shell.Find() == "" {
+		t.Skip("no shell on this host")
+	}
+
+	con, err := console.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { con.Close() })
+
+	sh, err := shell.New(t.Context(), con.TTY())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		sh.Run()
+	}()
+
+	srv := httptest.NewServer(New(con).Handler())
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Error("shell did not stop when the test ended")
+		}
+	})
+
+	return "ws" + strings.TrimPrefix(srv.URL, "http") +
+		Path + "?" + ParamStdin + "=1&" + ParamStdout + "=1&" + ParamTTY + "=1"
+}
+
+func attachTo(t *testing.T, url string) (*websocket.Conn, *sink) {
+	t.Helper()
+	conn, _, err := websocket.Dial(t.Context(), url, &websocket.DialOptions{
+		Subprotocols: []string{"v4.channel.k8s.io"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+
+	screen := &sink{}
+	go func() {
+		for {
+			_, frame, err := conn.Read(t.Context())
+			if err != nil {
+				return
+			}
+			if len(frame) > 1 && frame[0] == channelStdout {
+				screen.Write(frame[1:])
+			}
+		}
+	}()
+
+	// Give the attach time to be established before anything is typed.
+	time.Sleep(300 * time.Millisecond)
+	return conn, screen
+}
+
+func send(t *testing.T, conn *websocket.Conn, channel byte, payload []byte) {
+	t.Helper()
+	frame := append([]byte{channel}, payload...)
+	if err := conn.Write(t.Context(), websocket.MessageBinary, frame); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type sink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *sink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *sink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *sink) waitFor(t *testing.T, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.String(), want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("never saw %q on screen; got %q", want, s.String())
+}

@@ -37,6 +37,10 @@ type Console struct {
 	mu      sync.Mutex
 	display io.Writer
 
+	// Resizes arrive from whichever client is attached and can land at any
+	// moment, including while the console is being torn down.
+	masterMu  sync.Mutex
+	closed    bool
 	closeOnce sync.Once
 }
 
@@ -124,6 +128,11 @@ func (c *Console) release() {
 
 // Resize sets the window size that programs see.
 func (c *Console) Resize(rows, cols uint16) error {
+	c.masterMu.Lock()
+	defer c.masterMu.Unlock()
+	if c.closed {
+		return os.ErrClosed
+	}
 	return pty.Setsize(c.master, &pty.Winsize{Rows: rows, Cols: cols})
 }
 
@@ -133,6 +142,12 @@ func (c *Console) Resize(rows, cols uint16) error {
 func (c *Console) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		// Shut the door on resizes before closing, and wait for any already
+		// under way: a resize reads the descriptor this is about to close.
+		c.masterMu.Lock()
+		c.closed = true
+		c.masterMu.Unlock()
+
 		c.tty.Close()
 		err = c.master.Close()
 	})
