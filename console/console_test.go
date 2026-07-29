@@ -65,6 +65,56 @@ func TestReplaysScrollback(t *testing.T) {
 	secondScreen.waitFor(t, "remembered")
 }
 
+// TestScrollbackResumesAtALine checks that dropping the oldest output does not
+// cut an escape sequence in half. Cutting by byte count alone once left a
+// client's first line reading "[0m-padding": the escape had lost its opening
+// byte and printed as text.
+func TestScrollbackResumesAtALine(t *testing.T) {
+	line := []byte("ANSI-\x1b[31mred\x1b[0m-padding\n")
+
+	for _, chunk := range []int{len(line), 4 << 10, scrollback * 2} {
+		t.Run(fmt.Sprintf("written %d bytes at a time", chunk), func(t *testing.T) {
+			con := &Console{}
+			var batch []byte
+			for len(batch) < chunk {
+				batch = append(batch, line...)
+			}
+			for written := 0; written < scrollback*2; written += len(batch) {
+				con.remember(batch)
+			}
+
+			if len(con.history) == 0 {
+				t.Fatal("nothing was remembered")
+			}
+			if !bytes.HasPrefix(con.history, []byte("ANSI-")) {
+				start := con.history
+				if len(start) > 40 {
+					start = start[:40]
+				}
+				t.Errorf("scrollback resumes mid-line at %q", start)
+			}
+			if len(con.history) > scrollback {
+				t.Errorf("scrollback grew to %d bytes, over the %d limit", len(con.history), scrollback)
+			}
+		})
+	}
+}
+
+// TestReplayClearsStyle checks that a client is not handed the formatting that
+// was in force before it arrived.
+func TestReplayClearsStyle(t *testing.T) {
+	con := &Console{}
+	con.remember([]byte("\x1b[31mstill red\n"))
+
+	var screen bytes.Buffer
+	if err := con.claim(&screen); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(screen.Bytes(), sgrReset) {
+		t.Errorf("replay does not start by clearing style: %q", screen.Bytes())
+	}
+}
+
 // TestOneClientAtATime checks that a second client cannot attach on top of the
 // first and steal half its output.
 func TestOneClientAtATime(t *testing.T) {

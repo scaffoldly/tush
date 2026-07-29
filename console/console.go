@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -26,6 +27,9 @@ var ErrBusy = errors.New("console already has a client attached")
 // program's redraw, which is what makes a reconnect land somewhere recognisable
 // rather than on a blank screen.
 const scrollback = 256 << 10
+
+// sgrReset turns off any colour or style still in force.
+var sgrReset = []byte("\x1b[0m")
 
 // Console is a pseudo-terminal for the shell to run against. Handing the shell
 // a real terminal rather than a plain pipe is what makes the kernel line
@@ -102,12 +106,27 @@ func (c *Console) paint() {
 func (c *Console) remember(out []byte) {
 	if len(out) >= scrollback {
 		c.history = append(c.history[:0], out[len(out)-scrollback:]...)
+		c.history = fromLineStart(c.history)
 		return
 	}
 	c.history = append(c.history, out...)
 	if len(c.history) > scrollback {
 		c.history = append(c.history[:0], c.history[len(c.history)-scrollback:]...)
+		c.history = fromLineStart(c.history)
 	}
+}
+
+// fromLineStart drops a partial first line, because dropping the oldest output
+// by byte count cuts wherever it lands — including the middle of an escape
+// sequence. Replaying from there prints the tail of the sequence as text, or
+// worse, leaves the terminal in a mode the missing bytes were meant to end.
+// Sequences do not span lines, so a line boundary is a safe place to resume.
+func fromLineStart(history []byte) []byte {
+	i := bytes.IndexByte(history, '\n')
+	if i < 0 || i+1 >= len(history) {
+		return history
+	}
+	return history[i+1:]
 }
 
 // Attach makes out the console's display and feeds it whatever arrives on in,
@@ -143,6 +162,10 @@ func (c *Console) claim(out io.Writer) error {
 		return ErrBusy
 	}
 	if len(c.history) > 0 {
+		// The scrollback resumes partway through a session, so whatever colour
+		// or style was in force before it is not in the replay. Clear it rather
+		// than let the client inherit the previous client's formatting.
+		out.Write(sgrReset)
 		out.Write(c.history)
 	}
 	c.display = out
