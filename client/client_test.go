@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnuss/tush/console"
 	"github.com/cnuss/tush/pipeline"
 	"github.com/cnuss/tush/shell"
 )
@@ -35,6 +36,61 @@ func TestDrivesHostShell(t *testing.T) {
 	// Host stderr reaches the terminal too, on its own connection.
 	fmt.Fprintln(local, "echo oops >&2")
 	screen.waitFor(t, "oops")
+}
+
+// TestThroughAConsole runs the host exactly as main.go wires it, with the shell
+// on a pseudo-terminal behind the tunnel.
+func TestThroughAConsole(t *testing.T) {
+	ctx := t.Context()
+	l := listen(t)
+
+	host := pipeline.New(ctx).WithListener(l)
+	hostIO := host.Stdio()
+
+	con, err := console.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { con.Close() })
+	con.Attach(ctx, hostIO.Stdin, hostIO.Stdout)
+	go shell.New(ctx).WithStdio(con.TTY(), con.TTY(), hostIO.Stderr).Run()
+
+	local, screen := startClient(t, ctx, tunnelURL(l))
+
+	fmt.Fprintln(local, "echo through-the-pty")
+	screen.waitFor(t, "through-the-pty")
+}
+
+// TestDetachKey checks that the escape key stops the client, which is the only
+// way out once a raw terminal is forwarding Ctrl+C to the host.
+func TestDetachKey(t *testing.T) {
+	ctx := t.Context()
+	l := listen(t)
+	pipeline.New(ctx).WithListener(l)
+
+	pipe := pipeline.New(ctx).WithURL(tunnelURL(l))
+	localR, localW := io.Pipe()
+	screenR, screenW := io.Pipe()
+	drain(t, screenR)
+
+	status := make(chan int, 1)
+	go func() {
+		status <- New(ctx).
+			WithTerminal(pipe.Terminal()).
+			WithStdio(localR, screenW, screenW).
+			Run()
+	}()
+
+	localW.Write([]byte{detachKey})
+
+	select {
+	case got := <-status:
+		if got != 0 {
+			t.Errorf("client exit status = %d, want 0", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not detach")
+	}
 }
 
 // TestExitsWhenHostGoes checks that the terminal stops when the host is gone,

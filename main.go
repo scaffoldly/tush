@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/cnuss/tush/client"
+	"github.com/cnuss/tush/console"
 	"github.com/cnuss/tush/pipeline"
 	"github.com/cnuss/tush/queue"
 	"github.com/cnuss/tush/shell"
@@ -43,8 +44,20 @@ func main() {
 		// The shell blocks on its first prompt until a client attaches, so the
 		// URL is printed before this point.
 		streams := pipe.Stdio()
-		sh := shell.New(ctx).WithStdio(streams.Stdin, streams.Stdout, streams.Stderr)
-		os.Exit(sh.Run())
+
+		// The shell runs against a real terminal rather than the tunnel
+		// directly, so that echo, line editing and full-screen programs work.
+		con, err := console.Open()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
+			os.Exit(1)
+		}
+		sh := shell.New(ctx).WithStdio(con.TTY(), con.TTY(), streams.Stderr)
+		con.WithInterrupt(sh.Interrupt).Attach(ctx, streams.Stdin, streams.Stdout)
+
+		status := sh.Run()
+		con.Close()
+		os.Exit(status)
 	}
 
 	target, err := url.Parse(arg)

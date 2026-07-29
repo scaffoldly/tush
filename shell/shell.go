@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -21,6 +22,10 @@ type Shell struct {
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+
+	mu            sync.Mutex
+	cancelCommand context.CancelFunc
+	interrupted   bool
 }
 
 func New(ctx context.Context) *Shell {
@@ -75,6 +80,7 @@ func (s *Shell) runAll() error {
 	opts := append([]interp.RunnerOption{
 		interp.Interactive(true),
 		interp.StdIO(stdin, s.stdout, s.stderr),
+		s.interruptible(),
 	}, s.ros...)
 
 	r, err := interp.New(opts...)
@@ -139,13 +145,70 @@ func (s *Shell) runInteractive(r *interp.Runner, stdin io.Reader) error {
 	}
 }
 
+// Interrupt stops the command that is running, if any, leaving the shell
+// itself alive to prompt again. It does nothing when the shell is idle.
+func (s *Shell) Interrupt() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancelCommand == nil {
+		return
+	}
+	s.interrupted = true
+	s.cancelCommand()
+}
+
+// interruptible runs commands under a context of the shell's own, so that an
+// interrupt reaches the running command alone.
+//
+// The obvious approach — cancelling the context passed to [interp.Runner.Run] —
+// does not work: the interpreter treats a cancelled run as fatal and marks
+// itself exited, which would end the session rather than the command. Giving
+// only the exec handler a cancellable context leaves the interpreter none the
+// wiser, and the default handler already signals the process it started.
+func (s *Shell) interruptible() interp.RunnerOption {
+	return interp.ExecHandlers(func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			s.mu.Lock()
+			s.cancelCommand = cancel
+			s.mu.Unlock()
+			defer func() {
+				s.mu.Lock()
+				s.cancelCommand = nil
+				s.mu.Unlock()
+			}()
+
+			err := next(ctx, args)
+			if ctx.Err() != nil && s.ctx.Err() == nil {
+				// Report an interrupted command the way a signalled one
+				// reports itself. Any other error would be taken as the
+				// handler failing, which the interpreter treats as fatal.
+				return interp.ExitStatus(exitInterrupted)
+			}
+			return err
+		}
+	})
+}
+
 // exec runs one statement, reporting whether the shell should stop. A command
 // that merely exits non-zero is normal and says nothing; a genuine failure is
 // worth reporting to the user.
 func (s *Shell) exec(r *interp.Runner, stmt *syntax.Stmt) (done bool, err error) {
 	runErr := r.Run(s.ctx, stmt)
+
+	s.mu.Lock()
+	interrupted := s.interrupted
+	s.interrupted = false
+	s.mu.Unlock()
+
 	if r.Exited() || s.ctx.Err() != nil {
 		return true, runErr
+	}
+	if interrupted {
+		fmt.Fprintf(s.stdout, "^C\n")
+		return false, nil
 	}
 	var status interp.ExitStatus
 	if runErr != nil && !errors.As(runErr, &status) {
