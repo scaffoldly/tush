@@ -83,6 +83,43 @@ func TestSecondClientRefused(t *testing.T) {
 	}
 }
 
+// TestReleasesAfterAbruptDisconnect checks that a client which vanishes without
+// closing cleanly — killed, or its network pulled — does not leave the console
+// claimed against everyone who comes after it.
+func TestReleasesAfterAbruptDisconnect(t *testing.T) {
+	host := startHost(t)
+
+	conn, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
+		Subprotocols: []string{"v4.channel.k8s.io"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, conn, channelStdin, []byte("echo att''ached\n"))
+	time.Sleep(300 * time.Millisecond)
+
+	// Drop the connection without a closing handshake, the way a killed
+	// process would.
+	conn.CloseNow()
+
+	// The next client should get in promptly rather than waiting out a socket
+	// timeout.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		next, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
+			Subprotocols: []string{"v4.channel.k8s.io"},
+		})
+		if err == nil {
+			next.CloseNow()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("console still claimed by the departed client: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // startHost runs a console, a shell on it, and the attach endpoint, returning
 // the WebSocket address a client would dial.
 func startHost(t *testing.T) string {
