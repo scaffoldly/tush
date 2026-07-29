@@ -6,7 +6,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,13 +51,18 @@ var shellExited, shellExitedFormat = func() (string, string) {
 // a hundred seconds, long before tush's own timeout would.
 const keepAliveInterval = 30 * time.Second
 
-// detachKey is Ctrl+D. A raw terminal forwards Ctrl+C to the host rather than
-// stopping the client, so there has to be some other way out.
+// detachPrefix and detachSuffix are Ctrl+P then Ctrl+Q, the sequence docker
+// attach uses. A raw terminal forwards Ctrl+C to the host rather than stopping
+// the client, so there has to be some other way out.
 //
-// The host never sees this key, so it cannot serve as end of input there:
-// ending the remote shell takes an explicit exit, and a command reading
-// standard input cannot be closed from the keyboard.
-const detachKey = 0x04
+// A pair rather than a single key, because any single key worth pressing is
+// already spoken for: Ctrl+D is end of input and half-page-scroll, and some
+// terminals swallow it before it arrives at all. Only the pair is taken; a
+// lone Ctrl+P reaches the host like anything else.
+const (
+	detachPrefix = 0x10
+	detachSuffix = 0x11
+)
 
 // Client is a dumb terminal attached to a shell on the far end of a tunnel.
 type Client struct {
@@ -112,7 +116,7 @@ func (c *Client) Run() int {
 	}
 	defer restore()
 	if raw {
-		fmt.Fprintf(c.stderr, "Press Ctrl+D to detach.\r\n")
+		fmt.Fprintf(c.stderr, "Press Ctrl+P Ctrl+Q to detach.\r\n")
 		c.reportSize(conn)
 		// The window can be resized at any point in the session, and the shell
 		// only learns of it if the client says so.
@@ -184,19 +188,29 @@ func (c *Client) render(conn *websocket.Conn) int {
 	}
 }
 
-// forward sends what the user types to the host, watching for the detach key.
+// forward sends what the user types to the host, watching for the sequence that
+// means detach.
 func (c *Client) forward(conn *websocket.Conn, detach func()) {
 	buf := make([]byte, 4096)
+
+	// held is a trailing Ctrl+P, kept back until the next key says whether it
+	// began the sequence or was just a keystroke.
+	var held []byte
+
 	for {
 		n, err := c.stdin.Read(buf)
 		if n > 0 {
-			typed := buf[:n]
-			if i := bytes.IndexByte(typed, detachKey); i >= 0 {
-				c.send(conn, channelStdin, typed[:i])
-				detach()
-				return
+			var send []byte
+			var detached bool
+			send, detached, held = splitDetach(append(held, buf[:n]...))
+
+			if len(send) > 0 {
+				if err := c.send(conn, channelStdin, send); err != nil {
+					return
+				}
 			}
-			if err := c.send(conn, channelStdin, typed); err != nil {
+			if detached {
+				detach()
 				return
 			}
 		}
@@ -204,6 +218,24 @@ func (c *Client) forward(conn *websocket.Conn, detach func()) {
 			return
 		}
 	}
+}
+
+// splitDetach separates what should reach the host from the detach sequence and
+// from an escape still in progress. A Ctrl+P at the very end is held back, since
+// only the next key can say what it meant.
+func splitDetach(typed []byte) (send []byte, detach bool, held []byte) {
+	for i := 0; i < len(typed); i++ {
+		if typed[i] != detachPrefix {
+			continue
+		}
+		if i == len(typed)-1 {
+			return typed[:i], false, []byte{detachPrefix}
+		}
+		if typed[i+1] == detachSuffix {
+			return typed[:i], true, nil
+		}
+	}
+	return typed, false, nil
 }
 
 // keepAlive keeps the connection warm while the user is not typing. The frame

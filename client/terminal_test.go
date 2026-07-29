@@ -17,16 +17,20 @@ import (
 // is the only way to reach the parts that only run against one: raw mode, the
 // detach key, and reporting the window size.
 
-// TestDetachKeyLeavesShellRunning checks that Ctrl+D ends the client and no
-// more than the client — the shell it was attached to carries on.
-func TestDetachKeyLeavesShellRunning(t *testing.T) {
+// TestDetachSequenceLeavesShellRunning checks that Ctrl+P Ctrl+Q ends the
+// client and no more than the client — the shell it was attached to carries on.
+func TestDetachSequenceLeavesShellRunning(t *testing.T) {
 	host := startHost(t)
 	screen, status := startClientOnTerminal(t, t.Context(), host)
 
 	screen.typeLine("echo att''ached")
 	screen.waitFor(t, "attached")
 
-	screen.press(detachKey)
+	// A lone Ctrl+P is ordinary input and must not detach on its own.
+	screen.press(detachPrefix)
+	screen.typeLine("")
+	screen.press(detachPrefix)
+	screen.press(detachSuffix)
 
 	select {
 	case code := <-status:
