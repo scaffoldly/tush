@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"golang.org/x/term"
@@ -44,6 +45,12 @@ var shellExited, shellExitedFormat = func() (string, string) {
 	whole := fmt.Sprintf(attach.ExitedFormat, 0)
 	return whole[:strings.LastIndex(whole, "0")], attach.ExitedFormat
 }()
+
+// keepAliveInterval is how often to send a byte of nothing when the user is not
+// typing. A terminal is idle most of the time, and an intermediary will drop a
+// connection it believes has gone quiet — Cloudflare's edge does so after about
+// a hundred seconds, long before tush's own timeout would.
+const keepAliveInterval = 30 * time.Second
 
 // detachKey is Ctrl+D. A raw terminal forwards Ctrl+C to the host rather than
 // stopping the client, so there has to be some other way out.
@@ -116,6 +123,7 @@ func (c *Client) Run() int {
 	var once sync.Once
 	detach := func() { once.Do(func() { close(detached) }) }
 	go c.forward(conn, detach)
+	go c.keepAlive(conn)
 
 	status := make(chan int, 1)
 	go func() { status <- c.render(conn) }()
@@ -193,6 +201,25 @@ func (c *Client) forward(conn *websocket.Conn, detach func()) {
 			}
 		}
 		if err != nil {
+			return
+		}
+	}
+}
+
+// keepAlive keeps the connection warm while the user is not typing. The frame
+// carries nothing at all — not even a channel — which the host skips without
+// touching the session; its only purpose is to be traffic.
+func (c *Client) keepAlive(conn *websocket.Conn) {
+	tick := time.NewTicker(keepAliveInterval)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-tick.C:
+			if err := conn.Write(c.ctx, websocket.MessageBinary, nil); err != nil {
+				return
+			}
+		case <-c.ctx.Done():
 			return
 		}
 	}

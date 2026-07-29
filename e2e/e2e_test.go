@@ -65,9 +65,16 @@ func TestSurvivesDetachOverARealTunnel(t *testing.T) {
 // afterwards. The edge may drop a WebSocket it considers idle long before
 // tush's own timeout, which would strand a user mid-session.
 func TestIdleSessionSurvives(t *testing.T) {
-	idle := 3 * time.Minute
 	if testing.Short() {
 		t.Skip("idle test takes minutes")
+	}
+	idle := 3 * time.Minute
+	if set := os.Getenv("TUSH_E2E_IDLE"); set != "" {
+		parsed, err := time.ParseDuration(set)
+		if err != nil {
+			t.Fatalf("TUSH_E2E_IDLE: %v", err)
+		}
+		idle = parsed
 	}
 
 	host := publish(t)
