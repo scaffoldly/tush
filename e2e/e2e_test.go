@@ -137,7 +137,39 @@ func publish(t *testing.T) *url.URL {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForEdge(t, u)
 	return u
+}
+
+// waitForEdge blocks until the published URL actually reaches this process.
+//
+// A freshly minted hostname takes a moment to propagate, and until it has, the
+// edge answers on its own — a 530 or a 1033 — rather than forwarding. Dialing
+// in that window fails in a way that reads like a bug in tush, so wait for the
+// route instead of hoping a fixed pause covers it.
+func waitForEdge(t *testing.T, u *url.URL) {
+	t.Helper()
+
+	// The attach endpoint refuses a request that selects no streams, so a 400
+	// is proof the request arrived here rather than stopping at the edge.
+	probe := u.JoinPath(attach.Path).String()
+	deadline := time.Now().Add(2 * time.Minute)
+
+	for {
+		resp, err := http.Get(probe)
+		if err == nil {
+			code := resp.StatusCode
+			resp.Body.Close()
+			if code == http.StatusBadRequest {
+				return
+			}
+			err = fmt.Errorf("edge answered %d", code)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel %s never routed here: %v", u, err)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // attachClient attaches a client with pipes standing in for a terminal.
