@@ -1,0 +1,106 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release.yaml
+      - '**/*.go'
+      - go.*
+      - Makefile
+    tags:
+      - v*
+
+concurrency:
+  # Queue rather than cancel: canceling a half-finished release can leave
+  # archives unsigned or a draft release partially populated.
+  cancel-in-progress: false
+  group: ${{ github.workflow }}--${{ github.ref }}
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      draft-release-name: ${{ steps.create-draft-release.outputs.draft-release-name }}
+    permissions:
+      contents: write
+    steps:
+      - if: github.event_name == 'push'
+        id: create-draft-release
+        uses: int128/go-release-action/create-draft-release@9e1d6ec29fc6ffc2ba55f631baf4a73017d228e1 # v2.5.0
+
+  build:
+    needs: create
+    strategy:
+      matrix:
+        platform:
+          - runs-on: ubuntu-latest
+            GOOS: linux
+            GOARCH: amd64
+          - runs-on: ubuntu-latest
+            GOOS: linux
+            GOARCH: arm64
+          - runs-on: macos-latest
+            GOOS: darwin
+            GOARCH: amd64
+          - runs-on: macos-latest
+            GOOS: darwin
+            GOARCH: arm64
+    runs-on: ${{ matrix.platform.runs-on }}
+    env:
+      GOOS: ${{ matrix.platform.GOOS }}
+      GOARCH: ${{ matrix.platform.GOARCH }}
+      CGO_ENABLED: 0
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: build release binary
+        run: >-
+          go build
+          -ldflags "-s -w -X main.version=${{ needs.create.outputs.draft-release-name }}"
+          -o tush .
+      - uses: int128/go-release-action@9e1d6ec29fc6ffc2ba55f631baf4a73017d228e1 # v2.5.0
+        with:
+          binary: tush
+          release-name: ${{ needs.create.outputs.draft-release-name }}
+
+  sign:
+    needs: [create, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.create.outputs.draft-release-name }}
+    steps:
+      - name: download release archives
+        run: |
+          mkdir -p dist
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --dir dist --pattern '*'
+
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: sign archives and upload bundles
+        run: |
+          set -euo pipefail
+          for f in dist/*; do
+            cosign sign-blob --yes --bundle "${f}.sigstore" "$f"
+          done
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/*.sigstore
