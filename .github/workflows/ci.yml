@@ -235,8 +235,13 @@ jobs:
           # (OIDC -> Fulcio cert -> Rekor transparency log). The signature,
           # cert, and Rekor entry are bundled in a single .sigstore file.
           for ext in tar.gz zip; do
-            curl -fsSL "https://github.com/${repo}/archive/refs/tags/${tag}.${ext}" \
-              -o "dist/${tag}.${ext}"
+            # This repository may be private, so fetch the generated archive
+            # through the authenticated GitHub API rather than codeload.
+            case "$ext" in
+              tar.gz) archive=tarball ;;
+              zip)    archive=zipball ;;
+            esac
+            gh api "repos/${repo}/${archive}/${tag}" > "dist/${tag}.${ext}"
             cosign sign-blob --yes \
               --bundle "dist/${tag}.${ext}.sigstore" \
               "dist/${tag}.${ext}"
