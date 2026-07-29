@@ -1,0 +1,27 @@
+# Binaries
+/tush
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage
+*.test
+*.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor (uncomment if not vendoring)
+# vendor/
+
+# Env
+.env
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
