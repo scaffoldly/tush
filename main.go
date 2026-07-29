@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"github.com/cnuss/tush/client"
+	"github.com/cnuss/tush/pipeline"
 	"github.com/cnuss/tush/queue"
 	"github.com/cnuss/tush/shell"
+	"github.com/cnuss/tush/tunnel"
 )
 
 var version = "dev"
@@ -24,12 +28,36 @@ func main() {
 
 	switch arg {
 	case "version":
-		fmt.Printf("%s: %s\n", bin, version)
+		fmt.Fprintf(os.Stdout, "%s: %s\n", bin, version)
+		os.Exit(0)
+	case "help":
+		fmt.Fprintf(os.Stdout, "Usage: %s [URL]\n", bin)
+		fmt.Fprintf(os.Stdout, "  If no URL is provided, a new tunnel will be created.\n")
 		os.Exit(0)
 	case "":
-		shell := shell.New(ctx)
-		os.Exit(shell.Run())
+		tun := tunnel.New(ctx, "tunnel.pizza")
+		pipe := pipeline.New(ctx).WithListener(tun.Listener())
+		fmt.Fprintf(os.Stderr, "%s\n", tun.URL())
+		fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop the tunnel.\n")
+
+		// The shell blocks on its first prompt until a client attaches, so the
+		// URL is printed before this point.
+		streams := pipe.Stdio()
+		sh := shell.New(ctx).WithStdio(streams.Stdin, streams.Stdout, streams.Stderr)
+		os.Exit(sh.Run())
 	}
 
-	fmt.Printf("%s: unimplemented\n", bin)
+	target, err := url.Parse(arg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
+		os.Exit(1)
+	}
+
+	// Client mode is a dumb terminal: it forwards local input to the host and
+	// renders what comes back.
+	pipe := pipeline.New(ctx).WithURL(target)
+	cli := client.New(ctx).
+		WithTerminal(pipe.Terminal()).
+		WithStdio(os.Stdin, os.Stdout, os.Stderr)
+	os.Exit(cli.Run())
 }
