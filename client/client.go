@@ -1,31 +1,54 @@
+// Package client is the terminal end of a tush session.
+//
+// It runs no interpreter: it forwards what the user types to the host and
+// renders what comes back, speaking the Kubernetes remote command protocol so
+// that the host is talking to something kubectl attach could stand in for.
 package client
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sync"
 
+	"github.com/coder/websocket"
 	"golang.org/x/term"
 
-	"github.com/cnuss/tush/pipeline"
+	"github.com/cnuss/tush/attach"
 )
 
 // exitInterrupted is the conventional status for a client killed by a signal.
 const exitInterrupted = 130
 
-// detachKey is Ctrl+], the same escape telnet uses. A raw terminal forwards
-// Ctrl+C to the host instead of stopping the client, so there has to be some
-// other way out.
-const detachKey = 0x1d
+// subprotocol is the version of the remote command protocol tush speaks: the
+// binary framing, with exit codes reported on the error channel.
+const subprotocol = "v4.channel.k8s.io"
 
-// Client is a dumb terminal. It runs no interpreter of its own: it forwards
-// what the user types to the host and renders what the host sends back.
+// The protocol prefixes every message with the channel it belongs to.
+const (
+	channelStdin  = 0
+	channelStdout = 1
+	channelStderr = 2
+	channelError  = 3
+	channelResize = 4
+)
+
+// detachKey is Ctrl+D. A raw terminal forwards Ctrl+C to the host rather than
+// stopping the client, so there has to be some other way out.
+//
+// The host never sees this key, so it cannot serve as end of input there:
+// ending the remote shell takes an explicit exit, and a command reading
+// standard input cannot be closed from the keyboard.
+const detachKey = 0x04
+
+// Client is a dumb terminal attached to a shell on the far end of a tunnel.
 type Client struct {
-	ctx  context.Context
-	term *pipeline.Terminal
+	ctx context.Context
+	url *url.URL
 
 	stdin  io.Reader
 	stdout io.Writer
@@ -36,9 +59,9 @@ func New(ctx context.Context) *Client {
 	return &Client{ctx: ctx}
 }
 
-// WithTerminal sets the tunnel end the client talks to.
-func (c *Client) WithTerminal(t *pipeline.Terminal) *Client {
-	c.term = t
+// WithURL sets the tunnel to attach to.
+func (c *Client) WithURL(u *url.URL) *Client {
+	c.url = u
 	return c
 }
 
@@ -48,12 +71,24 @@ func (c *Client) WithStdio(stdin io.Reader, stdout, stderr io.Writer) *Client {
 	return c
 }
 
-// Run forwards streams until the host hangs up, the user detaches, or the
-// context is cancelled.
+// Run attaches to the host and stays until the shell ends, the user detaches,
+// or the context is cancelled.
 func (c *Client) Run() int {
-	if c.term == nil || c.stdin == nil || c.stdout == nil || c.stderr == nil {
+	if c.url == nil || c.stdin == nil || c.stdout == nil || c.stderr == nil {
 		return 1
 	}
+
+	conn, _, err := websocket.Dial(c.ctx, c.endpoint().String(), &websocket.DialOptions{
+		Subprotocols: []string{subprotocol},
+	})
+	if err != nil {
+		fmt.Fprintf(c.stderr, "tush: %v\n", err)
+		return 1
+	}
+	defer conn.CloseNow()
+	// A terminal session is one long message per keystroke and per screen
+	// update, but a program painting a full screen can produce a large one.
+	conn.SetReadLimit(32 << 20)
 
 	restore, raw, err := c.makeRaw()
 	if err != nil {
@@ -62,47 +97,84 @@ func (c *Client) Run() int {
 	}
 	defer restore()
 	if raw {
-		fmt.Fprintf(c.stderr, "Press Ctrl+] to detach.\r\n")
+		fmt.Fprintf(c.stderr, "Press Ctrl+D to detach.\r\n")
+		c.reportSize(conn)
 	}
 
 	detached := make(chan struct{})
 	var once sync.Once
 	detach := func() { once.Do(func() { close(detached) }) }
+	go c.forward(conn, detach)
 
-	// Local input travels to the host for as long as the client lives. It is
-	// not waited on: it blocks reading the user's terminal, which nothing else
-	// can interrupt.
-	go c.forward(detach)
-	go io.Copy(c.stderr, c.term.Stderr)
-
-	hostGone := make(chan struct{})
-	go func() {
-		defer close(hostGone)
-		io.Copy(c.stdout, c.term.Stdout)
-	}()
+	status := make(chan int, 1)
+	go func() { status <- c.render(conn) }()
 
 	select {
-	case <-hostGone:
-		return 0
+	case code := <-status:
+		return code
 	case <-detached:
+		conn.Close(websocket.StatusNormalClosure, "detached")
 		return 0
 	case <-c.ctx.Done():
 		return exitInterrupted
 	}
 }
 
+// endpoint is the attach URL for the tunnel, as a WebSocket address.
+func (c *Client) endpoint() *url.URL {
+	u := c.url.JoinPath(attach.Path)
+	switch u.Scheme {
+	case "https", "wss":
+		u.Scheme = "wss"
+	default:
+		u.Scheme = "ws"
+	}
+	q := u.Query()
+	q.Set(attach.ParamStdin, "1")
+	q.Set(attach.ParamStdout, "1")
+	q.Set(attach.ParamTTY, "1")
+	u.RawQuery = q.Encode()
+	return u
+}
+
+// render paints what the host sends and reports the status it ended with.
+func (c *Client) render(conn *websocket.Conn) int {
+	for {
+		_, frame, err := conn.Read(c.ctx)
+		if err != nil {
+			if c.ctx.Err() != nil {
+				return exitInterrupted
+			}
+			return 0
+		}
+		if len(frame) == 0 {
+			continue
+		}
+		payload := frame[1:]
+		switch frame[0] {
+		case channelStdout:
+			c.stdout.Write(payload)
+		case channelStderr:
+			c.stderr.Write(payload)
+		case channelError:
+			return exitStatus(payload)
+		}
+	}
+}
+
 // forward sends what the user types to the host, watching for the detach key.
-func (c *Client) forward(detach func()) {
+func (c *Client) forward(conn *websocket.Conn, detach func()) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := c.stdin.Read(buf)
 		if n > 0 {
-			if i := bytes.IndexByte(buf[:n], detachKey); i >= 0 {
-				c.term.Stdin.Write(buf[:i])
+			typed := buf[:n]
+			if i := bytes.IndexByte(typed, detachKey); i >= 0 {
+				c.send(conn, channelStdin, typed[:i])
 				detach()
 				return
 			}
-			if _, werr := c.term.Stdin.Write(buf[:n]); werr != nil {
+			if err := c.send(conn, channelStdin, typed); err != nil {
 				return
 			}
 		}
@@ -110,6 +182,35 @@ func (c *Client) forward(detach func()) {
 			return
 		}
 	}
+}
+
+// send writes one frame on the given channel.
+func (c *Client) send(conn *websocket.Conn, channel byte, payload []byte) error {
+	frame := make([]byte, 0, len(payload)+1)
+	frame = append(frame, channel)
+	frame = append(frame, payload...)
+	return conn.Write(c.ctx, websocket.MessageBinary, frame)
+}
+
+// reportSize tells the host how big the user's terminal is, so that full-screen
+// programs draw to the right shape.
+func (c *Client) reportSize(conn *websocket.Conn) {
+	f, ok := c.stdin.(*os.File)
+	if !ok {
+		return
+	}
+	cols, rows, err := term.GetSize(int(f.Fd()))
+	if err != nil {
+		return
+	}
+	size, err := json.Marshal(struct {
+		Width  uint16
+		Height uint16
+	}{Width: uint16(cols), Height: uint16(rows)})
+	if err != nil {
+		return
+	}
+	c.send(conn, channelResize, size)
 }
 
 // makeRaw puts a real terminal into raw mode so keystrokes reach the host as
@@ -125,4 +226,34 @@ func (c *Client) makeRaw() (restore func(), raw bool, err error) {
 		return nil, false, err
 	}
 	return func() { term.Restore(int(f.Fd()), state) }, true, nil
+}
+
+// exitStatus reads the status the host reported when the shell ended. The
+// protocol sends a success marker for a clean exit and details otherwise.
+func exitStatus(payload []byte) int {
+	var status struct {
+		Status  string `json:"status"`
+		Details struct {
+			Causes []struct {
+				Reason  string `json:"reason"`
+				Message string `json:"message"`
+			} `json:"causes"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(payload, &status); err != nil {
+		return 0
+	}
+	if status.Status == "Success" {
+		return 0
+	}
+	for _, cause := range status.Details.Causes {
+		if cause.Reason != "ExitCode" {
+			continue
+		}
+		var code int
+		if _, err := fmt.Sscanf(cause.Message, "%d", &code); err == nil {
+			return code
+		}
+	}
+	return 1
 }

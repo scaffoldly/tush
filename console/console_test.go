@@ -2,6 +2,7 @@ package console
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -12,76 +13,88 @@ import (
 	"github.com/cnuss/tush/shell"
 )
 
-// TestEchoesInput checks that the kernel line discipline is in play: what the
-// user types comes back without the shell doing anything, which is what makes
-// typing visible to a remote terminal in raw mode.
-func TestEchoesInput(t *testing.T) {
+// Markers are written so that their echo differs from their output. A terminal
+// echoes the typed line back, so a marker that read the same either way would
+// be satisfied by the echo alone and prove nothing.
+
+// TestRunsCommands checks that a shell on the console runs what it is told.
+func TestRunsCommands(t *testing.T) {
 	con := open(t)
+	runShell(t, con)
 	in, screen := attach(t, con)
 
-	go shell.New(t.Context()).WithStdio(con.TTY(), con.TTY(), io.Discard).Run()
-
-	fmt.Fprint(in, "hello")
+	fmt.Fprintln(in, "echo he''llo")
 	screen.waitFor(t, "hello")
 }
 
-// TestShellSeesATerminal checks that the shell and its commands really are on a
-// terminal, which is what full-screen programs test for.
-//
-// The marker is written so that its echo differs from its output. The line
-// discipline echoes the typed line back, so a marker that reads the same either
-// way would be satisfied by the echo alone and prove nothing.
-func TestShellSeesATerminal(t *testing.T) {
+// TestSurvivesDetach is the point of attaching rather than executing: a client
+// can leave and another arrive to find the same shell, with its state intact.
+func TestSurvivesDetach(t *testing.T) {
 	con := open(t)
-	in, screen := attach(t, con)
+	runShell(t, con)
 
-	go shell.New(t.Context()).WithStdio(con.TTY(), con.TTY(), io.Discard).Run()
+	firstCtx, leave := context.WithCancel(context.Background())
+	first, firstScreen := attachWith(t, con, firstCtx)
+	fmt.Fprintln(first, "FOO=bar")
+	fmt.Fprintln(first, "echo fir''st:$FOO")
+	firstScreen.waitFor(t, "first:bar")
 
-	fmt.Fprintln(in, "test -t 1 && echo on-a-''tty")
-	screen.waitFor(t, "on-a-tty")
+	leave()
+	time.Sleep(200 * time.Millisecond)
+
+	second, secondScreen := attach(t, con)
+	fmt.Fprintln(second, "echo seco''nd:$FOO")
+	secondScreen.waitFor(t, "second:bar")
 }
 
-// TestInterruptsRunningCommand checks that Ctrl+C stops the command that is
-// running without ending the session.
-func TestInterruptsRunningCommand(t *testing.T) {
+// TestOneClientAtATime checks that a second client cannot attach on top of the
+// first and steal half its output.
+func TestOneClientAtATime(t *testing.T) {
 	con := open(t)
-	inR, inW := io.Pipe()
-	screenR, screenW := io.Pipe()
-	screen := drain(t, screenR)
+	runShell(t, con)
+	attach(t, con)
 
-	sh := shell.New(t.Context()).WithStdio(con.TTY(), con.TTY(), io.Discard)
-	con.WithInterrupt(sh.Interrupt).Attach(t.Context(), inR, screenW)
-	go sh.Run()
-
-	fmt.Fprintln(inW, "echo RE''ADY")
-	screen.waitFor(t, "READY")
-
-	fmt.Fprintln(inW, "sleep 5")
-	time.Sleep(300 * time.Millisecond)
-
-	start := time.Now()
-	inW.Write([]byte{interruptKey})
-	fmt.Fprintln(inW, "echo BA''CK")
-	screen.waitFor(t, "BACK")
-
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("command ran to completion instead of being interrupted, after %v", elapsed)
+	err := con.Attach(t.Context(), strings.NewReader(""), io.Discard)
+	if err != ErrBusy {
+		t.Errorf("second attach returned %v, want %v", err, ErrBusy)
 	}
 }
 
-// TestResize checks that the window size programs see can be changed.
+// TestResize checks that the window size programs see can be changed, which is
+// what full-screen programs need in order to draw the right shape.
 func TestResize(t *testing.T) {
 	con := open(t)
+	runShell(t, con)
 	in, screen := attach(t, con)
 
 	if err := con.Resize(40, 100); err != nil {
 		t.Fatal(err)
 	}
-
-	go shell.New(t.Context()).WithStdio(con.TTY(), con.TTY(), io.Discard).Run()
-
 	fmt.Fprintln(in, "stty size")
 	screen.waitFor(t, "40 100")
+}
+
+// TestJobControl checks that Ctrl+C reaches the running command through the
+// terminal itself, with nothing in tush delivering it.
+func TestJobControl(t *testing.T) {
+	con := open(t)
+	runShell(t, con)
+	in, screen := attach(t, con)
+
+	fmt.Fprintln(in, "echo re''ady")
+	screen.waitFor(t, "ready")
+
+	fmt.Fprintln(in, "sleep 5")
+	time.Sleep(500 * time.Millisecond)
+
+	start := time.Now()
+	in.Write([]byte{0x03})
+	fmt.Fprintln(in, "echo ba''ck")
+	screen.waitFor(t, "back")
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("command ran to completion instead of being interrupted, after %v", elapsed)
+	}
 }
 
 func open(t *testing.T) *Console {
@@ -90,43 +103,68 @@ func open(t *testing.T) *Console {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Registered first so it runs last: the shell holds the terminal as its own
+	// descriptor and must be gone before it is closed.
 	t.Cleanup(func() { con.Close() })
 	return con
 }
 
-// attach wires the console to pipes standing in for the tunnel, returning what
-// to type into and what the remote terminal would show.
-func attach(t *testing.T, con *Console) (io.Writer, *sink) {
+// runShell starts a shell on the console and waits, at the end of the test, for
+// it to stop.
+func runShell(t *testing.T, con *Console) {
 	t.Helper()
-	inR, inW := io.Pipe()
-	screenR, screenW := io.Pipe()
-	con.Attach(t.Context(), inR, screenW)
-	return inW, drain(t, screenR)
+	if shell.Find() == "" {
+		t.Skip("no shell on this host")
+	}
+	sh, err := shell.New(t.Context(), con.TTY())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		sh.Run()
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Error("shell did not stop when the test ended")
+		}
+	})
 }
 
+func attach(t *testing.T, con *Console) (io.Writer, *sink) {
+	t.Helper()
+	return attachWith(t, con, t.Context())
+}
+
+// attachWith attaches pipes standing in for a client, returning what to type
+// into and what that client would see.
+func attachWith(t *testing.T, con *Console, ctx context.Context) (io.Writer, *sink) {
+	t.Helper()
+	inR, inW := io.Pipe()
+	screen := &sink{}
+	go con.Attach(ctx, inR, screen)
+
+	// Give the attach time to claim the console, so that a caller which types
+	// immediately is not writing into a terminal nobody is watching.
+	time.Sleep(50 * time.Millisecond)
+	return inW, screen
+}
+
+// sink accumulates everything a client is shown, so a test can wait for output
+// without racing the prompts interleaved with it.
 type sink struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func drain(t *testing.T, r io.Reader) *sink {
-	t.Helper()
-	s := &sink{}
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				s.mu.Lock()
-				s.buf.Write(buf[:n])
-				s.mu.Unlock()
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return s
+func (s *sink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
 }
 
 func (s *sink) String() string {

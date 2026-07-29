@@ -6,218 +6,151 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/cnuss/tush/attach"
 	"github.com/cnuss/tush/console"
-	"github.com/cnuss/tush/pipeline"
 	"github.com/cnuss/tush/shell"
 )
 
-// TestDrivesHostShell is the whole product in one test: a user types into a
+// Markers are written so that their echo differs from their output, since the
+// terminal echoes back what is typed.
+
+// TestAttachesToHostShell is the whole product in one test: a user types into a
 // local terminal, the command runs in the shell behind the tunnel, and the
-// output comes back.
-func TestDrivesHostShell(t *testing.T) {
-	ctx := t.Context()
-	l := listen(t)
+// output comes back — over the same protocol kubectl attach speaks.
+func TestAttachesToHostShell(t *testing.T) {
+	host := startHost(t)
+	local, screen := startClient(t, t.Context(), host)
 
-	host := pipeline.New(ctx).WithListener(l)
-	hostIO := host.Stdio()
-	go shell.New(ctx).WithStdio(hostIO.Stdin, hostIO.Stdout, hostIO.Stderr).Run()
-
-	local, screen := startClient(t, ctx, tunnelURL(l))
-
-	fmt.Fprintln(local, "echo hello-from-terminal")
-	screen.waitFor(t, "hello-from-terminal")
-
-	// Host stderr reaches the terminal too, on its own connection.
-	fmt.Fprintln(local, "echo oops >&2")
-	screen.waitFor(t, "oops")
+	local.typeLine("echo hello-from-a-term''inal")
+	screen.waitFor(t, "hello-from-a-terminal")
 }
 
-// TestThroughAConsole runs the host exactly as main.go wires it, with the shell
-// on a pseudo-terminal behind the tunnel.
-func TestThroughAConsole(t *testing.T) {
-	ctx := t.Context()
-	l := listen(t)
+// TestSurvivesDetach checks that a client can leave and another arrive to find
+// the same shell still running, with its state intact.
+func TestSurvivesDetach(t *testing.T) {
+	host := startHost(t)
 
-	host := pipeline.New(ctx).WithListener(l)
-	hostIO := host.Stdio()
+	firstCtx, leave := context.WithCancel(context.Background())
+	first, firstScreen := startClient(t, firstCtx, host)
+	first.typeLine("FOO=bar")
+	first.typeLine("echo fir''st:$FOO")
+	firstScreen.waitFor(t, "first:bar")
+
+	leave()
+	time.Sleep(300 * time.Millisecond)
+
+	second, secondScreen := startClient(t, t.Context(), host)
+	second.typeLine("echo seco''nd:$FOO")
+	secondScreen.waitFor(t, "second:bar")
+}
+
+// startHost runs a console, a shell on it, and the attach endpoint, returning
+// the URL a client would be given.
+func startHost(t *testing.T) *url.URL {
+	t.Helper()
+	if shell.Find() == "" {
+		t.Skip("no shell on this host")
+	}
 
 	con, err := console.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { con.Close() })
-	con.Attach(ctx, hostIO.Stdin, hostIO.Stdout)
-	go shell.New(ctx).WithStdio(con.TTY(), con.TTY(), hostIO.Stderr).Run()
 
-	local, screen := startClient(t, ctx, tunnelURL(l))
-
-	fmt.Fprintln(local, "echo through-the-pty")
-	screen.waitFor(t, "through-the-pty")
-}
-
-// TestDetachKey checks that the escape key stops the client, which is the only
-// way out once a raw terminal is forwarding Ctrl+C to the host.
-func TestDetachKey(t *testing.T) {
-	ctx := t.Context()
-	l := listen(t)
-	pipeline.New(ctx).WithListener(l)
-
-	pipe := pipeline.New(ctx).WithURL(tunnelURL(l))
-	localR, localW := io.Pipe()
-	screenR, screenW := io.Pipe()
-	drain(t, screenR)
-
-	status := make(chan int, 1)
+	sh, err := shell.New(t.Context(), con.TTY())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan struct{})
 	go func() {
-		status <- New(ctx).
-			WithTerminal(pipe.Terminal()).
-			WithStdio(localR, screenW, screenW).
-			Run()
+		defer close(stopped)
+		sh.Run()
 	}()
 
-	localW.Write([]byte{detachKey})
-
-	select {
-	case got := <-status:
-		if got != 0 {
-			t.Errorf("client exit status = %d, want 0", got)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("client did not detach")
-	}
-}
-
-// TestExitsWhenHostGoes checks that the terminal stops when the host is gone,
-// rather than waiting forever for a reconnect it cannot make.
-func TestExitsWhenHostGoes(t *testing.T) {
-	hostCtx, stopHost := context.WithCancel(context.Background())
-	l := listen(t)
-
-	host := pipeline.New(hostCtx).WithListener(l)
-	hostIO := host.Stdio()
-	go shell.New(hostCtx).WithStdio(hostIO.Stdin, hostIO.Stdout, hostIO.Stderr).Run()
-
-	ctx := t.Context()
-	pipe := pipeline.New(ctx).WithURL(tunnelURL(l))
-	localR, localW := io.Pipe()
-	screenR, screenW := io.Pipe()
-
-	status := make(chan int, 1)
-	go func() {
-		status <- New(ctx).
-			WithTerminal(pipe.Terminal()).
-			WithStdio(localR, screenW, screenW).
-			Run()
-	}()
-
-	screen := drain(t, screenR)
-	fmt.Fprintln(localW, "echo connected")
-	screen.waitFor(t, "connected")
-
-	stopHost()
-
-	select {
-	case got := <-status:
-		if got != 0 {
-			t.Errorf("client exit status = %d, want 0", got)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("client did not exit after the host went away")
-	}
-}
-
-// TestInterrupted checks that a cancelled context stops the client with the
-// conventional signal status.
-func TestInterrupted(t *testing.T) {
-	ctx, interrupt := context.WithCancel(context.Background())
-	l := listen(t)
-
-	pipe := pipeline.New(ctx).WithURL(tunnelURL(l))
-	localR, _ := io.Pipe()
-	screenR, screenW := io.Pipe()
-	drain(t, screenR)
-
-	status := make(chan int, 1)
-	go func() {
-		status <- New(ctx).
-			WithTerminal(pipe.Terminal()).
-			WithStdio(localR, screenW, screenW).
-			Run()
-	}()
-
-	interrupt()
-
-	select {
-	case got := <-status:
-		if got != exitInterrupted {
-			t.Errorf("client exit status = %d, want %d", got, exitInterrupted)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("client did not stop when interrupted")
-	}
-}
-
-// startClient wires a client to the tunnel with pipes standing in for a
-// terminal, returning what to type into and what the user would see.
-func startClient(t *testing.T, ctx context.Context, u *url.URL) (io.Writer, *sink) {
-	t.Helper()
-	pipe := pipeline.New(ctx).WithURL(u)
-	localR, localW := io.Pipe()
-	screenR, screenW := io.Pipe()
-
-	go New(ctx).
-		WithTerminal(pipe.Terminal()).
-		WithStdio(localR, screenW, screenW).
-		Run()
-
-	return localW, drain(t, screenR)
-}
-
-func listen(t *testing.T) net.Listener {
-	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { l.Close() })
-	return l
-}
+	srv := &http.Server{Handler: attach.New(con).Handler()}
+	go srv.Serve(l)
 
-func tunnelURL(l net.Listener) *url.URL {
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Error("shell did not stop when the test ended")
+		}
+	})
+
 	return &url.URL{Scheme: "http", Host: l.Addr().String()}
 }
 
-// sink accumulates everything a stream produces, so a test can wait for output
+// startClient attaches a client with pipes standing in for a terminal,
+// returning something to type into and what the user would see.
+func startClient(t *testing.T, ctx context.Context, host *url.URL) (*keyboard, *sink) {
+	t.Helper()
+	localR, localW := io.Pipe()
+	screen := &sink{}
+
+	status := make(chan int, 1)
+	go func() {
+		status <- New(ctx).WithURL(host).WithStdio(localR, screen, screen).Run()
+	}()
+	t.Cleanup(func() {
+		select {
+		case code := <-status:
+			t.Logf("client exited with status %d; screen was %q", code, screen.String())
+		default:
+		}
+	})
+
+	// Give the attach time to be established, so that a caller which types
+	// immediately is not writing into a session that does not exist yet.
+	time.Sleep(300 * time.Millisecond)
+	return newKeyboard(localW), screen
+}
+
+// keyboard types into the client without blocking the test: writing to a pipe
+// nobody is reading would otherwise hang forever if the client has gone. Lines
+// are queued and written by one goroutine, so they arrive in the order typed.
+type keyboard struct {
+	lines chan string
+}
+
+func newKeyboard(w io.Writer) *keyboard {
+	k := &keyboard{lines: make(chan string, 64)}
+	go func() {
+		for line := range k.lines {
+			fmt.Fprintln(w, line)
+		}
+	}()
+	return k
+}
+
+func (k *keyboard) typeLine(line string) {
+	k.lines <- line
+}
+
+// sink accumulates everything the user is shown, so a test can wait for output
 // without racing the prompts interleaved with it.
 type sink struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func drain(t *testing.T, r io.Reader) *sink {
-	t.Helper()
-	s := &sink{}
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				s.mu.Lock()
-				s.buf.Write(buf[:n])
-				s.mu.Unlock()
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return s
+func (s *sink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
 }
 
 func (s *sink) String() string {

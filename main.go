@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"github.com/cnuss/tush/attach"
 	"github.com/cnuss/tush/client"
 	"github.com/cnuss/tush/console"
-	"github.com/cnuss/tush/pipeline"
 	"github.com/cnuss/tush/queue"
 	"github.com/cnuss/tush/shell"
 	"github.com/cnuss/tush/tunnel"
@@ -36,28 +37,7 @@ func main() {
 		fmt.Fprintf(os.Stdout, "  If no URL is provided, a new tunnel will be created.\n")
 		os.Exit(0)
 	case "":
-		tun := tunnel.New(ctx, "tunnel.pizza")
-		pipe := pipeline.New(ctx).WithListener(tun.Listener())
-		fmt.Fprintf(os.Stderr, "%s\n", tun.URL())
-		fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop the tunnel.\n")
-
-		// The shell blocks on its first prompt until a client attaches, so the
-		// URL is printed before this point.
-		streams := pipe.Stdio()
-
-		// The shell runs against a real terminal rather than the tunnel
-		// directly, so that echo, line editing and full-screen programs work.
-		con, err := console.Open()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
-			os.Exit(1)
-		}
-		sh := shell.New(ctx).WithStdio(con.TTY(), con.TTY(), streams.Stderr)
-		con.WithInterrupt(sh.Interrupt).Attach(ctx, streams.Stdin, streams.Stdout)
-
-		status := sh.Run()
-		con.Close()
-		os.Exit(status)
+		os.Exit(host(ctx, bin))
 	}
 
 	target, err := url.Parse(arg)
@@ -65,12 +45,41 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
 		os.Exit(1)
 	}
+	os.Exit(client.New(ctx).
+		WithURL(target).
+		WithStdio(os.Stdin, os.Stdout, os.Stderr).
+		Run())
+}
 
-	// Client mode is a dumb terminal: it forwards local input to the host and
-	// renders what comes back.
-	pipe := pipeline.New(ctx).WithURL(target)
-	cli := client.New(ctx).
-		WithTerminal(pipe.Terminal()).
-		WithStdio(os.Stdin, os.Stdout, os.Stderr)
-	os.Exit(cli.Run())
+// host publishes a tunnel and serves the shell behind it. The shell runs on a
+// pseudo-terminal that outlives any one client, so a client that drops can
+// reconnect to the session it left.
+func host(ctx context.Context, bin string) int {
+	con, err := console.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
+		return 1
+	}
+
+	sh, err := shell.New(ctx, con.TTY())
+	if err != nil {
+		con.Close()
+		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
+		return 1
+	}
+
+	tun := tunnel.New(ctx, "tunnel.pizza")
+	srv := &http.Server{Handler: attach.New(con).Handler()}
+	go srv.Serve(tun.Listener())
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
+
+	fmt.Fprintf(os.Stderr, "%s\n", tun.URL())
+	fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop the tunnel.\n")
+
+	status := sh.Run()
+	con.Close()
+	return status
 }
