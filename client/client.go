@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -36,6 +37,13 @@ const (
 	channelError  = 3
 	channelResize = 4
 )
+
+// shellExited marks where, in a message the protocol has wrapped in prose of
+// its own, the host's report of the shell's status begins.
+var shellExited, shellExitedFormat = func() (string, string) {
+	whole := fmt.Sprintf(attach.ExitedFormat, 0)
+	return whole[:strings.LastIndex(whole, "0")], attach.ExitedFormat
+}()
 
 // detachKey is Ctrl+D. A raw terminal forwards Ctrl+C to the host rather than
 // stopping the client, so there has to be some other way out.
@@ -99,6 +107,9 @@ func (c *Client) Run() int {
 	if raw {
 		fmt.Fprintf(c.stderr, "Press Ctrl+D to detach.\r\n")
 		c.reportSize(conn)
+		// The window can be resized at any point in the session, and the shell
+		// only learns of it if the client says so.
+		watchResize(c.ctx, func() { c.reportSize(conn) })
 	}
 
 	detached := make(chan struct{})
@@ -133,6 +144,9 @@ func (c *Client) endpoint() *url.URL {
 	q.Set(attach.ParamStdin, "1")
 	q.Set(attach.ParamStdout, "1")
 	q.Set(attach.ParamTTY, "1")
+	if term := os.Getenv("TERM"); term != "" {
+		q.Set(attach.ParamTerm, term)
+	}
 	u.RawQuery = q.Encode()
 	return u
 }
@@ -228,11 +242,14 @@ func (c *Client) makeRaw() (restore func(), raw bool, err error) {
 	return func() { term.Restore(int(f.Fd()), state) }, true, nil
 }
 
-// exitStatus reads the status the host reported when the shell ended. The
-// protocol sends a success marker for a clean exit and details otherwise.
+// exitStatus reads the status the host reported when the session ended. A
+// success marker means a clean end; otherwise the details may name an exit
+// code, and failing that the host writes the shell's status into the message,
+// since attach has no field of its own for one.
 func exitStatus(payload []byte) int {
 	var status struct {
 		Status  string `json:"status"`
+		Message string `json:"message"`
 		Details struct {
 			Causes []struct {
 				Reason  string `json:"reason"`
@@ -252,6 +269,14 @@ func exitStatus(payload []byte) int {
 		}
 		var code int
 		if _, err := fmt.Sscanf(cause.Message, "%d", &code); err == nil {
+			return code
+		}
+	}
+	// The protocol wraps the host's message in prose of its own, so look for
+	// the report rather than expecting it to stand alone.
+	if at := strings.LastIndex(status.Message, shellExited); at >= 0 {
+		var code int
+		if _, err := fmt.Sscanf(status.Message[at:], shellExitedFormat, &code); err == nil {
 			return code
 		}
 	}

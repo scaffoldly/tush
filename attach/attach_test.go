@@ -41,6 +41,16 @@ func TestResizeReachesTheShell(t *testing.T) {
 	screen.waitFor(t, "40 100")
 }
 
+// TestTermReachesTheShell checks that the terminal type a client reports is the
+// one the shell runs with, which is what programs consult to decide what the
+// display can do.
+func TestTermReachesTheShell(t *testing.T) {
+	conn, screen := attachTo(t, startHost(t)+"&"+ParamTerm+"=tush-test-term")
+
+	send(t, conn, channelStdin, []byte("echo te''rm:$TERM\n"))
+	screen.waitFor(t, "term:tush-test-term")
+}
+
 // TestSecondClientRefused checks that a client cannot attach on top of another
 // and steal half its session.
 func TestSecondClientRefused(t *testing.T) {
@@ -87,17 +97,21 @@ func startHost(t *testing.T) string {
 	}
 	t.Cleanup(func() { con.Close() })
 
-	sh, err := shell.New(t.Context(), con.TTY())
-	if err != nil {
-		t.Fatal(err)
-	}
 	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		sh.Run()
-	}()
+	server := New(con, func(term string) (<-chan int, error) {
+		sh, err := shell.New(t.Context(), con.TTY())
+		if err != nil {
+			return nil, err
+		}
+		status := make(chan int, 1)
+		go func() {
+			defer close(stopped)
+			status <- sh.WithTerm(term).Run()
+		}()
+		return status, nil
+	})
 
-	srv := httptest.NewServer(New(con).Handler())
+	srv := httptest.NewServer(server.Handler())
 	t.Cleanup(func() {
 		srv.Close()
 		select {

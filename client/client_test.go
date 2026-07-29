@@ -51,6 +51,26 @@ func TestSurvivesDetach(t *testing.T) {
 	secondScreen.waitFor(t, "second:bar")
 }
 
+// TestReportsShellExitStatus checks that the status the shell ended with
+// reaches the client, which attach has no field of its own to carry.
+func TestReportsShellExitStatus(t *testing.T) {
+	host := startHost(t)
+	local, screen, status := startClientWithStatus(t, t.Context(), host)
+
+	local.typeLine("echo re''ady")
+	screen.waitFor(t, "ready")
+	local.typeLine("exit 7")
+
+	select {
+	case got := <-status:
+		if got != 7 {
+			t.Errorf("client exit status = %d, want 7; screen was %q", got, screen.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("client did not exit; screen was %q", screen.String())
+	}
+}
+
 // startHost runs a console, a shell on it, and the attach endpoint, returning
 // the URL a client would be given.
 func startHost(t *testing.T) *url.URL {
@@ -65,21 +85,25 @@ func startHost(t *testing.T) *url.URL {
 	}
 	t.Cleanup(func() { con.Close() })
 
-	sh, err := shell.New(t.Context(), con.TTY())
-	if err != nil {
-		t.Fatal(err)
-	}
 	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		sh.Run()
-	}()
+	server := attach.New(con, func(term string) (<-chan int, error) {
+		sh, err := shell.New(t.Context(), con.TTY())
+		if err != nil {
+			return nil, err
+		}
+		status := make(chan int, 1)
+		go func() {
+			defer close(stopped)
+			status <- sh.WithTerm(term).Run()
+		}()
+		return status, nil
+	})
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: attach.New(con).Handler()}
+	srv := &http.Server{Handler: server.Handler()}
 	go srv.Serve(l)
 
 	t.Cleanup(func() {
@@ -98,6 +122,12 @@ func startHost(t *testing.T) *url.URL {
 // returning something to type into and what the user would see.
 func startClient(t *testing.T, ctx context.Context, host *url.URL) (*keyboard, *sink) {
 	t.Helper()
+	local, screen, _ := startClientWithStatus(t, ctx, host)
+	return local, screen
+}
+
+func startClientWithStatus(t *testing.T, ctx context.Context, host *url.URL) (*keyboard, *sink, <-chan int) {
+	t.Helper()
 	localR, localW := io.Pipe()
 	screen := &sink{}
 
@@ -105,18 +135,11 @@ func startClient(t *testing.T, ctx context.Context, host *url.URL) (*keyboard, *
 	go func() {
 		status <- New(ctx).WithURL(host).WithStdio(localR, screen, screen).Run()
 	}()
-	t.Cleanup(func() {
-		select {
-		case code := <-status:
-			t.Logf("client exited with status %d; screen was %q", code, screen.String())
-		default:
-		}
-	})
 
 	// Give the attach time to be established, so that a caller which types
 	// immediately is not writing into a session that does not exist yet.
 	time.Sleep(300 * time.Millisecond)
-	return newKeyboard(localW), screen
+	return newKeyboard(localW), screen, status
 }
 
 // keyboard types into the client without blocking the test: writing to a pipe

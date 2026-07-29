@@ -47,6 +47,24 @@ func TestSurvivesDetach(t *testing.T) {
 	secondScreen.waitFor(t, "second:bar")
 }
 
+// TestReplaysScrollback checks that a client arriving late is shown what the
+// shell said before it got there, rather than a blank screen.
+func TestReplaysScrollback(t *testing.T) {
+	con := open(t)
+	runShell(t, con)
+
+	firstCtx, leave := context.WithCancel(context.Background())
+	first, firstScreen := attachWith(t, con, firstCtx)
+	first.Write([]byte("echo remem''bered\n"))
+	firstScreen.waitFor(t, "remembered")
+
+	leave()
+	time.Sleep(200 * time.Millisecond)
+
+	_, secondScreen := attach(t, con)
+	secondScreen.waitFor(t, "remembered")
+}
+
 // TestOneClientAtATime checks that a second client cannot attach on top of the
 // first and steal half its output.
 func TestOneClientAtATime(t *testing.T) {

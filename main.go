@@ -20,6 +20,9 @@ import (
 
 var version = "dev"
 
+// exitInterrupted is the conventional status for a process killed by a signal.
+const exitInterrupted = 130
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -55,31 +58,45 @@ func main() {
 // pseudo-terminal that outlives any one client, so a client that drops can
 // reconnect to the session it left.
 func host(ctx context.Context, bin string) int {
+	if shell.Find() == "" {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, shell.ErrNoShell)
+		return 1
+	}
+
 	con, err := console.Open()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
 		return 1
 	}
+	defer con.Close()
 
-	sh, err := shell.New(ctx, con.TTY())
-	if err != nil {
-		con.Close()
-		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
-		return 1
-	}
+	// The shell starts with the first client rather than now, so that it takes
+	// that client's terminal type and writes its opening prompt to somebody.
+	srv := attach.New(con, func(term string) (<-chan int, error) {
+		sh, err := shell.New(ctx, con.TTY())
+		if err != nil {
+			return nil, err
+		}
+		status := make(chan int, 1)
+		go func() { status <- sh.WithTerm(term).Run() }()
+		return status, nil
+	})
 
 	tun := tunnel.New(ctx, "tunnel.pizza")
-	srv := &http.Server{Handler: attach.New(con).Handler()}
-	go srv.Serve(tun.Listener())
+	http := &http.Server{Handler: srv.Handler()}
+	go http.Serve(tun.Listener())
 	go func() {
 		<-ctx.Done()
-		srv.Close()
+		http.Close()
 	}()
 
 	fmt.Fprintf(os.Stderr, "%s\n", tun.URL())
 	fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop the tunnel.\n")
 
-	status := sh.Run()
-	con.Close()
-	return status
+	select {
+	case status := <-srv.Exited():
+		return status
+	case <-ctx.Done():
+		return exitInterrupted
+	}
 }

@@ -21,6 +21,12 @@ const (
 // has one.
 var ErrBusy = errors.New("console already has a client attached")
 
+// scrollback is how much recent output a console remembers, to replay to a
+// client when it attaches. Enough to carry a screen or two of a full-screen
+// program's redraw, which is what makes a reconnect land somewhere recognisable
+// rather than on a blank screen.
+const scrollback = 256 << 10
+
 // Console is a pseudo-terminal for the shell to run against. Handing the shell
 // a real terminal rather than a plain pipe is what makes the kernel line
 // discipline apply: input is echoed back, line editing works, full-screen
@@ -36,6 +42,7 @@ type Console struct {
 
 	mu      sync.Mutex
 	display io.Writer
+	history []byte
 
 	// Resizes arrive from whichever client is attached and can land at any
 	// moment, including while the console is being torn down.
@@ -63,19 +70,22 @@ func (c *Console) TTY() *os.File {
 	return c.tty
 }
 
-// paint carries everything the shell writes to whichever client is attached.
-// One reader serves every client in turn, because a terminal cannot be read
-// from two places at once without the two stealing each other's bytes.
+// paint carries everything the shell writes to whichever client is attached,
+// and remembers the tail of it. One reader serves every client in turn, because
+// a terminal cannot be read from two places at once without the two stealing
+// each other's bytes.
 //
-// Output produced while nobody is attached is dropped rather than held, so that
-// a shell left running with no client cannot fill the terminal's buffer and
-// then block on its own output.
+// Output is never held waiting for a client: a shell left running with nobody
+// attached would otherwise fill the terminal's buffer and block on its own
+// output. What a departed client missed is recovered from the scrollback when
+// the next one arrives, not by making the shell wait.
 func (c *Console) paint() {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := c.master.Read(buf)
 		if n > 0 {
 			c.mu.Lock()
+			c.remember(buf[:n])
 			if c.display != nil {
 				c.display.Write(buf[:n])
 			}
@@ -84,6 +94,19 @@ func (c *Console) paint() {
 		if err != nil {
 			return
 		}
+	}
+}
+
+// remember appends to the scrollback, dropping the oldest output once it is
+// full. Callers must hold mu.
+func (c *Console) remember(out []byte) {
+	if len(out) >= scrollback {
+		c.history = append(c.history[:0], out[len(out)-scrollback:]...)
+		return
+	}
+	c.history = append(c.history, out...)
+	if len(c.history) > scrollback {
+		c.history = append(c.history[:0], c.history[len(c.history)-scrollback:]...)
 	}
 }
 
@@ -110,11 +133,17 @@ func (c *Console) Attach(ctx context.Context, in io.Reader, out io.Writer) error
 	}
 }
 
+// claim makes out the display, first replaying what the shell has said
+// recently so that the client arrives at a screen with something on it rather
+// than waiting for the shell to speak again.
 func (c *Console) claim(out io.Writer) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.display != nil {
 		return ErrBusy
+	}
+	if len(c.history) > 0 {
+		out.Write(c.history)
 	}
 	c.display = out
 	return nil
