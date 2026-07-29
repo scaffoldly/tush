@@ -12,10 +12,12 @@ on:
       - Makefile
     tags:
       - v*
+  # No pull_request trigger: the draft is push-gated, so a PR build can't
+  # release, and ci.yml already validates that the code compiles.
 
 concurrency:
-  # Queue rather than cancel: canceling a half-finished release can leave
-  # archives unsigned or a draft release partially populated.
+  # Queue rather than cancel: a canceled run mid-publish can strand a
+  # half-populated draft release or leave assets unsigned.
   cancel-in-progress: false
   group: ${{ github.workflow }}--${{ github.ref }}
 
@@ -36,6 +38,9 @@ jobs:
     needs: create
     strategy:
       matrix:
+        # No Windows: the host puts the shell on a pseudo-terminal and hands it
+        # a controlling terminal for job control, which Windows has no
+        # equivalent of. tush cross-compiles for it, but nothing would work.
         platform:
           - runs-on: ubuntu-latest
             GOOS: linux
@@ -43,6 +48,9 @@ jobs:
           - runs-on: ubuntu-latest
             GOOS: linux
             GOARCH: arm64
+          - runs-on: ubuntu-latest
+            GOOS: linux
+            GOARCH: arm
           - runs-on: macos-latest
             GOOS: darwin
             GOARCH: amd64
@@ -61,8 +69,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - name: build release binary
-        run: >-
+      # go-release-action archives a pre-built binary and uploads it — it does
+      # not build, and has no ldflags input — so build here, cross-compiling per
+      # GOOS/GOARCH with the version injected. -s -w strip the symbol table and
+      # DWARF; the version is the tag, which is what `tush version` reports.
+      # -o names the binary tush, which is what the action expects.
+      - run: >-
           go build
           -ldflags "-s -w -X main.version=${{ needs.create.outputs.draft-release-name }}"
           -o tush .
@@ -71,15 +83,18 @@ jobs:
           binary: tush
           release-name: ${{ needs.create.outputs.draft-release-name }}
 
+  # After every platform archive is uploaded to the draft, sign each one:
+  # keyless cosign (proves who published) plus SLSA build provenance (attests
+  # how/where it was built).
   sign:
     needs: [create, build]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: write # download + upload release assets
+      id-token: write # cosign keyless signing + provenance OIDC
+      attestations: write # SLSA build provenance
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.create.outputs.draft-release-name }}
@@ -100,6 +115,8 @@ jobs:
       - name: sign archives and upload bundles
         run: |
           set -euo pipefail
+          # cosign writes each .sigstore next to its archive; attestation
+          # already ran, so dist/ still holds only the archives here.
           for f in dist/*; do
             cosign sign-blob --yes --bundle "${f}.sigstore" "$f"
           done

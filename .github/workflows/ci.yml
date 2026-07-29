@@ -3,8 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    # No tags trigger: a tag points at a main commit that already passed CI
+    # (on its PR and the main push), so re-testing it is redundant. release.yaml
+    # owns tags (build + sign + publish).
   pull_request:
     branches: [main]
+    # Defaults are [opened, synchronize, reopened]. Add ready_for_review
+    # so a draft -> ready transition re-runs CI without an empty push;
+    # keep synchronize explicit so every new commit on the PR triggers a
+    # fresh run.
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
@@ -20,13 +27,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # tush requires a Unix pseudo-terminal for the hosted shell, so the
-        # release and validation matrix deliberately excludes Windows.
+        # x64 + arm64 across linux and macos, all pinned to discrete image
+        # labels (no *-latest aliases) so every cell names an explicit version —
+        # the GitHub-hosted ARM runners (free for public repos) only exist as
+        # discrete labels, so pinning the rest keeps the matrix consistent.
+        # macos-26-intel is x64 (Intel), macos-26 is arm64 (Apple Silicon).
+        # Bumping an image label renames its check context, so update the
+        # branch-protection required contexts when bumping. gofmt runs
+        # Linux-only (see below), covering both Linux cells.
+        #
+        # No Windows: the host puts the shell on a pseudo-terminal and hands it
+        # a controlling terminal for job control, which Windows has no
+        # equivalent of. tush cross-compiles for it, but nothing would work.
         os:
           - ubuntu-24.04
           - ubuntu-24.04-arm
           - macos-26-intel
           - macos-26
+        # tush ships a binary, not a library — nobody compiles it against the
+        # go.mod floor, so only "stable" is validated. ("min" still resolves
+        # symbolically in the step below if a floor cell is ever reintroduced.)
         go: [stable]
     defaults:
       run:
@@ -34,12 +54,27 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: resolve go version
+        id: goversion
+        # "min" → the `go X.Y` directive in go.mod (the declared floor).
+        # Anything else (e.g. "stable") passes through unchanged so setup-go's
+        # aliases keep working.
+        run: |
+          if [ "${{ matrix.go }}" = "min" ]; then
+            v=$(awk '/^go [0-9]/ {print $2; exit}' go.mod)
+            echo "version=$v" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ matrix.go }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: ${{ matrix.go }}
+          go-version: ${{ steps.goversion.outputs.version }}
           cache: true
 
       - name: gofmt
+        # Linux-only: one canonical LF tree is enough to enforce formatting,
+        # and both Linux cells run it.
         if: runner.os == 'Linux'
         run: |
           out=$(gofmt -l .)
@@ -49,15 +84,24 @@ jobs:
             exit 1
           fi
 
+      # The make targets export CGO_ENABLED=0 (see Makefile) — tush is pure Go,
+      # and a static binary is what makes it droppable into a minimal image.
       - name: go vet
         run: make vet
 
       - name: go build
         run: make build
 
+      # The console and client packages open real pseudo-terminals and run the
+      # runner's shell, so these exercise the actual tty path rather than pipes.
       - name: tests
         run: make test
 
+      # One cell runs the live tier (a real tunnel from tunnel.pizza) so the
+      # public URL, edge TLS, and WebSocket upgrade are exercised without
+      # minting from every cell, which would trip the provider's rate limits.
+      # Without TUSH_E2E the e2e package skips, so the other cells still
+      # compile it.
       - name: e2e
         env:
           TUSH_E2E: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
