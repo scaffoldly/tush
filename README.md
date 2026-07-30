@@ -51,10 +51,16 @@ Publish a shell:
 tush
 ```
 
-It prints a URL. On any other machine:
+It waits for the tunnel to start routing, then prints the command to run on
+any other machine:
 
-```sh
-tush https://<hostname>.tunneled.pizza/
+```
+Attach from another machine with:
+
+    tush https://<hostname>.tunneled.pizza/
+
+Anyone with that URL gets a shell as you.
+Press Ctrl+C to stop the tunnel.
 ```
 
 You are now on a shell on the first machine. Press **Ctrl+P Ctrl+Q** to detach
@@ -96,7 +102,6 @@ Windows has no equivalent of either.
 Tracked as [issues](https://github.com/scaffoldly/tush/issues). The larger
 ones:
 
-- [#1](https://github.com/scaffoldly/tush/issues/1) — say what is happening while a tunnel is being created, and what to do with the URL.
 - [#2](https://github.com/scaffoldly/tush/issues/2) — `tush [command]`, so `tush k9s` tunnels k9s rather than only ever a shell.
 - [#3](https://github.com/scaffoldly/tush/issues/3) — attach from a browser at the tunnel URL, with nothing to install.
 
