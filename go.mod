@@ -1,4 +1,4 @@
-module github.com/cnuss/tush
+module github.com/scaffoldly/tush
 
 go 1.26.5
 

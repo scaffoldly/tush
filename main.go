@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/cnuss/tush/attach"
-	"github.com/cnuss/tush/client"
-	"github.com/cnuss/tush/console"
-	"github.com/cnuss/tush/queue"
-	"github.com/cnuss/tush/shell"
-	"github.com/cnuss/tush/tunnel"
+	"github.com/scaffoldly/tush/attach"
+	"github.com/scaffoldly/tush/client"
+	"github.com/scaffoldly/tush/console"
+	"github.com/scaffoldly/tush/queue"
+	"github.com/scaffoldly/tush/shell"
+	"github.com/scaffoldly/tush/tunnel"
 )
 
 var version = "dev"

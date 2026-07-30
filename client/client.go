@@ -19,7 +19,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/term"
 
-	"github.com/cnuss/tush/attach"
+	"github.com/scaffoldly/tush/attach"
 )
 
 // exitInterrupted is the conventional status for a client killed by a signal.

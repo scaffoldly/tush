@@ -11,8 +11,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/cnuss/tush/console"
-	"github.com/cnuss/tush/shell"
+	"github.com/scaffoldly/tush/console"
+	"github.com/scaffoldly/tush/shell"
 )
 
 // The protocol prefixes every message with the channel it belongs to.

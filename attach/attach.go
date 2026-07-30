@@ -16,7 +16,7 @@ import (
 
 	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
 
-	"github.com/cnuss/tush/console"
+	"github.com/scaffoldly/tush/console"
 )
 
 // Path is where the attach endpoint is served.

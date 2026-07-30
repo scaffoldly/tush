@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnuss/tush/attach"
-	"github.com/cnuss/tush/console"
-	"github.com/cnuss/tush/shell"
+	"github.com/scaffoldly/tush/attach"
+	"github.com/scaffoldly/tush/console"
+	"github.com/scaffoldly/tush/shell"
 )
 
 // Markers are written so that their echo differs from their output, since the

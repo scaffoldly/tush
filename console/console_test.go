@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnuss/tush/shell"
+	"github.com/scaffoldly/tush/shell"
 )
 
 // Markers are written so that their echo differs from their output. A terminal
