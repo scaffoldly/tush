@@ -92,7 +92,7 @@ func host(ctx context.Context, bin string) int {
 	})
 
 	report := progress.New(os.Stderr)
-	report.Step("Publishing a shell")
+	report.Step("Requesting tunnel...")
 
 	tun := tunnel.New(ctx, provider)
 	server := &http.Server{Handler: srv.Handler()}
@@ -106,7 +106,7 @@ func host(ctx context.Context, bin string) int {
 	// the moment it exists is one the first client may fail to reach. Wait for
 	// the round trip to land here before calling it ready.
 	address := tun.URL()
-	report.Step("Waiting for the tunnel to route")
+	report.Step("Connecting to tunnel...")
 	routed := waitForEdge(ctx, address)
 	report.Stop()
 

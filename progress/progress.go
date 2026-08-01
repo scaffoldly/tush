@@ -45,11 +45,14 @@ func isTerminal(w io.Writer) bool {
 
 // Step announces work that is starting, ending whatever step preceded it. On a
 // terminal it keeps animating until the next Step or a Stop.
+//
+// The message is printed as given — including any trailing ellipsis, which is
+// the caller's to write, so that the animated and plain forms read alike.
 func (r *Reporter) Step(message string) {
 	r.Stop()
 
 	if !r.animate {
-		fmt.Fprintf(r.w, "%s...\n", message)
+		fmt.Fprintf(r.w, "%s\n", message)
 		return
 	}
 

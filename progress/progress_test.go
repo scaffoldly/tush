@@ -15,7 +15,7 @@ import (
 func TestPlainWhenNotATerminal(t *testing.T) {
 	var out bytes.Buffer
 	r := New(&out)
-	r.Step("Publishing a shell")
+	r.Step("Publishing a shell...")
 	r.Stop()
 
 	got := out.String()
@@ -50,8 +50,8 @@ func TestStopIsSafeWithoutAStep(t *testing.T) {
 func TestStepEndsThePrevious(t *testing.T) {
 	var out bytes.Buffer
 	r := New(&out)
-	r.Step("first")
-	r.Step("second")
+	r.Step("first...")
+	r.Step("second...")
 	r.Stop()
 
 	got := out.String()

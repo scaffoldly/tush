@@ -1,12 +1,9 @@
-# Binaries
+# Build output: `make binary` writes the binary at the root, `make dist` the
+# cross-compiled release artifacts.
 /tush
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+/dist/
 
-# Test & coverage
+# Test and coverage output
 *.test
 *.out
 coverage.html
@@ -15,13 +12,7 @@ coverage.html
 go.work
 go.work.sum
 
-# Vendor (uncomment if not vendoring)
-# vendor/
-
-# Env
-.env
-
-# Editor/OS
+# Editor and OS
 .DS_Store
 .idea/
 .vscode/
