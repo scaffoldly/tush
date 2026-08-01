@@ -8,13 +8,16 @@ package attach
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
+	"k8s.io/klog/v2"
 
 	"github.com/scaffoldly/tush/console"
 )
@@ -26,6 +29,10 @@ const Path = "/attach"
 // dropped. A terminal is idle whenever nobody is typing, so this is generous.
 const idleTimeout = 4 * time.Hour
 
+// Subprotocol is the version of the remote command protocol tush speaks: the
+// binary framing, with exit codes reported on the error channel.
+const Subprotocol = "v4.channel.k8s.io"
+
 // The names the protocol gives its query parameters, kept here so the client
 // and the server agree without either importing the other.
 const (
@@ -34,6 +41,28 @@ const (
 	ParamStderr = remotecommand.ExecStderrParam
 	ParamTTY    = remotecommand.ExecTTYParam
 )
+
+// The protocol prefixes every message with the channel it belongs to. They live
+// here for the same reason the parameter names do: every client has to agree
+// with the server about them, and tush now has two clients — the terminal one
+// and the page served to a browser, which is handed these values rather than
+// repeating them in JavaScript where they could drift unnoticed.
+const (
+	ChannelStdin  = 0
+	ChannelStdout = 1
+	ChannelStderr = 2
+	ChannelError  = 3
+	ChannelResize = 4
+)
+
+// KeepAlive is how often a client should send a byte of nothing when the user
+// is not typing. A terminal is idle most of the time, and an intermediary will
+// drop a connection it believes has gone quiet — Cloudflare's edge does so
+// after about a hundred seconds, long before idleTimeout would.
+//
+// A WebSocket ping would be the natural thing, but the server side speaks
+// golang.org/x/net/websocket, which has no ping and would never answer one.
+const KeepAlive = 30 * time.Second
 
 // ParamTerm carries the client's terminal type. It is tush's own addition: the
 // protocol has no channel for the environment, and a shell needs to know what
@@ -59,6 +88,41 @@ const ExitedFormat = "shell exited with status %d"
 
 func (e ExitError) Error() string {
 	return fmt.Sprintf(ExitedFormat, e.Code)
+}
+
+// Quiet the logging the streaming library inherits from kubelet, which writes
+// to stderr — the terminal the user is sitting at.
+//
+// It reports things that are not errors here. A second person opening the URL
+// while somebody is attached is contention working as intended, and refusing
+// them is the correct outcome, but it arrives as "Unhandled Error" on the
+// publisher's screen. A client that closes its tab produces a socket-receive
+// error on every normal disconnect. Neither is actionable, both are addressed
+// to whoever runs a cluster rather than whoever published a shell, and the
+// client is already told what happened over the protocol.
+//
+// Real failures still reach the user: they travel on the error channel to the
+// client, and the ones that end a session come back through Exited.
+func init() {
+	var flags flag.FlagSet
+	klog.InitFlags(&flags)
+
+	// Both are needed, and the second is the one that is easy to miss:
+	// stderrthreshold sends anything at or above its level to stderr whatever
+	// logtostderr says, and it defaults to ERROR — precisely what is being
+	// silenced here. Setting only logtostderr changes nothing.
+	flags.Set("logtostderr", "false")
+	flags.Set("stderrthreshold", "FATAL")
+
+	// Belt to those braces: whatever klog decides to write later has nowhere
+	// to go. Nothing today depends on it.
+	klog.SetOutput(io.Discard)
+
+	// Errors also reach this handler rather than only klog, and the default one
+	// writes to stderr too — it is what produced the "Unhandled Error" line.
+	runtime.ErrorHandlers = []runtime.ErrorHandler{
+		func(_ context.Context, err error, msg string, keysAndValues ...any) {},
+	}
 }
 
 // Server hands out a console over the remote command protocol.
@@ -88,10 +152,11 @@ func (s *Server) Exited() <-chan int {
 	return s.exited
 }
 
-// Handler serves the attach endpoint.
+// Handler serves the attach endpoint. It is the endpoint alone rather than
+// something routed, because the caller now serves a browser page beside it and
+// so owns the routing.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		opts, err := remotecommand.NewOptions(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -110,7 +175,6 @@ func (s *Server) Handler() http.Handler {
 			remotecommand.SupportedStreamingProtocols,
 		)
 	})
-	return mux
 }
 
 type termKey struct{}

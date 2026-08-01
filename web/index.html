@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!--
+      The URL of this page is the credential. A crawler that indexes it
+      publishes the shell behind it, so say so here as well as in the header —
+      a page saved to disk keeps the meta tag and loses the header.
+    -->
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+
+    <!--
+      Deliberately plain, and deliberately without any Open Graph tags: an
+      unfurler should find nothing here worth putting in a preview.
+    -->
+    <title>tush</title>
+
+    <!--
+      A file rather than an inline data: URI. The URI was the obvious way to
+      avoid a request entirely, but browsers were observed resolving it as a
+      relative path — asking for /data:image/svg+xml,... and then falling back
+      to /favicon.ico anyway, so it cost two requests instead of saving one.
+
+      The cost worth avoiding was never the request. It was that /favicon.ico
+      reached the catch-all and rendered the entire page; both that route and
+      this one now serve a few hundred bytes that cache.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/assets/icon.svg" />
+
+    <!--
+      integrity and crossorigin are both required on every one of these.
+      Without crossorigin the browser cannot read the response well enough to
+      hash it and skips the check entirely — silently. See web/assets.go.
+    -->
+    <link
+      rel="stylesheet"
+      href="{{ .XtermCSS.URL }}"
+      integrity="{{ .XtermCSS.Integrity }}"
+      crossorigin="anonymous"
+    />
+
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0c0e;
+        --card: #16181d;
+        --edge: #2a2e37;
+        --text: #e6e8eb;
+        --dim: #9aa2ad;
+        --accent: #4c9f70;
+        --warn: #d98b4a;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+
+      /*
+        The terminal fills the window and is mounted before anything connects,
+        so that it is already at its final size when the shell writes its first
+        prompt. Laying it out at connect time would race that first paint
+        against a reflow, and the shell would draw to the wrong width.
+      */
+      #screen {
+        position: absolute;
+        inset: 0;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+
+      #overlay {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: rgba(11, 12, 14, 0.82);
+        backdrop-filter: blur(2px);
+      }
+
+      #overlay[hidden] {
+        display: none;
+      }
+
+      #card {
+        width: min(28rem, calc(100vw - 3rem));
+        padding: 1.75rem;
+        border: 1px solid var(--edge);
+        border-radius: 10px;
+        background: var(--card);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+        text-align: center;
+      }
+
+      #card h1 {
+        margin: 0 0 0.35rem;
+        font-size: 1.4rem;
+        letter-spacing: 0.02em;
+      }
+
+      #card h1 b {
+        color: var(--accent);
+      }
+
+      #tagline {
+        margin: 0 0 1.25rem;
+        font-size: 0.8rem;
+        color: var(--dim);
+      }
+
+      #message {
+        margin: 0 0 1.5rem;
+        font-size: 0.92rem;
+        line-height: 1.55;
+        color: var(--text);
+      }
+
+      #message code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.86em;
+        color: var(--dim);
+      }
+
+      #message .warn {
+        color: var(--warn);
+      }
+
+      #connect {
+        width: 100%;
+        padding: 0.7rem 1rem;
+        border: 0;
+        border-radius: 7px;
+        background: var(--accent);
+        color: #06120b;
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      #connect:hover:not(:disabled) {
+        filter: brightness(1.12);
+      }
+
+      #connect:disabled {
+        background: var(--edge);
+        color: var(--dim);
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="screen"></div>
+
+    <div id="overlay">
+      <div id="card">
+        <h1>t<b>u</b>sh</h1>
+        <p id="tagline"><b>TU</b>nnel <b>SH</b>ell</p>
+        <p id="message">
+          This is a shell on somebody else's machine, running as them. Anyone
+          holding this URL gets it.
+        </p>
+        <button id="connect" type="button">Connect</button>
+      </div>
+    </div>
+
+    <!--
+      Configuration, not code: the protocol's endpoint, subprotocol and channel
+      numbers, rendered from the Go constants that define them. It is
+      application/json so that no inline script exists and the content security
+      policy can stay at script-src 'self' plus the pinned CDN.
+    -->
+    <script type="application/json" id="tush-config">
+      {{ .Config }}
+    </script>
+
+    <script
+      src="{{ .XtermJS.URL }}"
+      integrity="{{ .XtermJS.Integrity }}"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="{{ .XtermFit.URL }}"
+      integrity="{{ .XtermFit.Integrity }}"
+      crossorigin="anonymous"
+    ></script>
+
+    <script src="/assets/tush.js"></script>
+  </body>
+</html>

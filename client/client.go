@@ -25,17 +25,16 @@ import (
 // exitInterrupted is the conventional status for a client killed by a signal.
 const exitInterrupted = 130
 
-// subprotocol is the version of the remote command protocol tush speaks: the
-// binary framing, with exit codes reported on the error channel.
-const subprotocol = "v4.channel.k8s.io"
-
-// The protocol prefixes every message with the channel it belongs to.
+// The protocol's subprotocol name and channel numbers live in attach, so that
+// every client — this one and the page served to a browser — agrees with the
+// server by construction.
 const (
-	channelStdin  = 0
-	channelStdout = 1
-	channelStderr = 2
-	channelError  = 3
-	channelResize = 4
+	subprotocol   = attach.Subprotocol
+	channelStdin  = attach.ChannelStdin
+	channelStdout = attach.ChannelStdout
+	channelStderr = attach.ChannelStderr
+	channelError  = attach.ChannelError
+	channelResize = attach.ChannelResize
 )
 
 // shellExited marks where, in a message the protocol has wrapped in prose of
@@ -46,10 +45,8 @@ var shellExited, shellExitedFormat = func() (string, string) {
 }()
 
 // keepAliveInterval is how often to send a byte of nothing when the user is not
-// typing. A terminal is idle most of the time, and an intermediary will drop a
-// connection it believes has gone quiet — Cloudflare's edge does so after about
-// a hundred seconds, long before tush's own timeout would.
-const keepAliveInterval = 30 * time.Second
+// typing. The reason it has to happen at all is in attach.KeepAlive.
+const keepAliveInterval = attach.KeepAlive
 
 // detachPrefix and detachSuffix are Ctrl+P then Ctrl+Q, the sequence docker
 // attach uses. A raw terminal forwards Ctrl+C to the host rather than stopping

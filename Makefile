@@ -1,4 +1,4 @@
-.PHONY: all check fmt fmt-check vet build test e2e binary dist run clean
+.PHONY: all check fmt fmt-check vet build test e2e binary dist run dev web-sri clean
 
 # tush is pure Go. Forcing CGO off keeps every build identical across hosts and
 # makes the binary static and dependency-free, so it can be dropped into a
@@ -76,6 +76,30 @@ dist:
 # Publish a tunnel and serve a shell behind it.
 run:
 	go run .
+
+# The same, set up for working on the browser page: the page is read from web/
+# rather than from the embed, so edit-refresh-look needs no rebuild; it is also
+# served on localhost, so looking at it needs no tunnel round trip; and requests
+# are logged, so a page that does not work says which half failed.
+#
+# The three are separate variables rather than one because only this combination
+# wants all of them. TUSH_DEBUG alone is worth setting against a real tunnel.
+dev: export TUSH_DEBUG = 1
+dev: export TUSH_LISTEN = 127.0.0.1:8080
+dev: export TUSH_WEB_DIR = web
+dev:
+	go run .
+
+# Check that the third-party assets the browser page loads still hash to what
+# web/assets.go records, and print the hash for each so a version bump can be
+# recorded. This is what a browser does on every load; doing it here means a
+# drift is found deliberately rather than as a page that stopped working.
+#
+# It touches the network, so it is opt-in like e2e rather than part of `all`: a
+# mismatch is either a bad version bump or a CDN serving something it should
+# not, and neither belongs in a routine unit-test run.
+web-sri:
+	TUSH_SRI=1 go test -count=1 -v -run TestAssetHashesStillMatch ./web
 
 clean:
 	rm -rf dist $(BINARY)

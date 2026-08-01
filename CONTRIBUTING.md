@@ -16,6 +16,10 @@ Deep-link by filename; line numbers will drift.
 | CLI entrypoint, host/client dispatch      | [`main.go`](./main.go)                                                     |
 | Pseudo-terminal, scrollback, attach/detach | [`console/console.go`](./console/console.go)                              |
 | Remote command protocol endpoint          | [`attach/attach.go`](./attach/attach.go)                                   |
+| Browser terminal: page, headers, routing  | [`web/web.go`](./web/web.go)                                               |
+| Browser terminal: the client, in JS       | [`web/assets/tush.js`](./web/assets/tush.js)                               |
+| Pinned CDN assets and their hashes        | [`web/assets.go`](./web/assets.go)                                         |
+| Development switches                      | [`debug/debug.go`](./debug/debug.go)                                       |
 | Running the user's shell on the terminal  | [`shell/shell.go`](./shell/shell.go)                                       |
 | Session leader + controlling terminal     | [`shell/procattr_unix.go`](./shell/procattr_unix.go)                       |
 | Terminal client (raw mode, detach, resize) | [`client/client.go`](./client/client.go)                                   |
@@ -43,6 +47,18 @@ remote command protocol ([`attach`](./attach/attach.go)) on a tunnel listener
 ([`client`](./client/client.go)). It runs no interpreter: it puts the local
 terminal in raw mode, forwards keystrokes, and paints what comes back.
 
+There is a second client. Opening the same URL in a browser gets a page
+([`web`](./web/web.go)) carrying the same client written in JavaScript
+([`tush.js`](./web/assets/tush.js)) — a browser speaks the protocol natively, so
+there is no second wire format, only a second implementation of the first. The
+constants that define it are rendered into the page from Go rather than written
+out again, because a copy that drifted would show an empty terminal and no
+error anywhere.
+
+The page attaches nothing until somebody presses a button. Things that are not
+people fetch URLs — unfurlers, chat previews, crawlers — and the URL is the
+only credential there is.
+
 Three decisions explain most of the code:
 
 1. **Attach, not exec.** The shell is started once and clients attach to what
@@ -69,7 +85,29 @@ make check      # the same, minus the build
 make test       # unit tests
 make binary     # a stamped ./tush to run by hand
 make dist       # cross-compiled release artifacts + SHA256SUMS
+make dev        # publish a tunnel, set up for working on the browser page
+make web-sri    # check the pinned CDN assets against their recorded hashes
 ```
+
+### Working on the browser page
+
+`make dev` sets three variables, which exist separately because only that
+combination wants all of them:
+
+| Variable            | Effect                                                     |
+| ------------------- | ---------------------------------------------------------- |
+| `TUSH_DEBUG`        | log each request to stderr                                  |
+| `TUSH_LISTEN=<addr>` | also serve on that address, printed beside the tunnel URL   |
+| `TUSH_WEB_DIR=<dir>` | read the page from there instead of from the binary         |
+
+`TUSH_WEB_DIR` is what makes the loop edit, refresh, look with no rebuild.
+`TUSH_DEBUG` is worth setting on its own against a real tunnel; the other two
+are not, which is why it does not imply them. `TUSH_LISTEN` has no default on
+purpose — a listener nobody asked for is a second way into a shell.
+
+`make web-sri` refetches each pinned asset and checks it still hashes to what
+[`web/assets.go`](./web/assets.go) records, logging what it found so a version
+bump can be recorded. It reaches the network, so it is opt-in like `e2e`.
 
 `make test` needs a working tty and a shell, but no network: the `console` and
 `client` tests open real pseudo-terminals and run `$SHELL`.
@@ -145,6 +183,46 @@ The edge answers on its own (530, 1033) until the hostname propagates. The e2e
 harness polls the attach endpoint until a 400 comes back — only this process
 refuses a request that selects no streams, so anything else is still the edge.
 Do not replace that with a sleep.
+
+### Subresource integrity needs `crossorigin`, and an exact version
+
+The browser page loads xterm.js from a CDN. The content security policy has to
+name that origin, so the origin alone permits anything it serves; what narrows
+that to the bytes intended is the `sha384` hash in each tag's `integrity`
+attribute — on a page whose purpose is handing out a shell.
+
+Two things must hold, and **neither fails visibly**:
+
+- Every tag carries `crossorigin="anonymous"`. Without it the browser cannot
+  read a cross-origin response well enough to hash it, so it **skips the check**
+  rather than failing. The page works perfectly, right up until the day the CDN
+  serves something else.
+- The version is exact, never a range. A range serves different bytes on the
+  next publish, and the check then takes the page down.
+
+`TestRemoteTagsArePinned` asserts on the rendered HTML rather than the constants
+behind it, because what protects the user is what reaches the browser. Note that
+`html/template` escapes the `+` in a base64 hash to `&#43;`; browsers decode
+attribute values, so this is correct, and the test decodes the same way.
+
+### The streaming library logs to the user's terminal
+
+It is kubelet's code and logs the way kubelet does — to stderr, which here is
+the terminal somebody published a shell from. A second person hitting a busy
+console produced `"Unhandled Error"` on the publisher's screen, for contention
+working exactly as intended.
+
+Silencing it takes three separate things, and the middle one is the trap:
+
+- `logtostderr=false` — **alone this does nothing**,
+- because `stderrthreshold` defaults to `ERROR` and overrides it,
+- and `runtime.ErrorHandlers` is a third path again, which is what produced the
+  `"Unhandled Error"` line.
+
+`TestRefusalIsQuiet` swaps the real stderr descriptor rather than reconfiguring
+a logger, because what matters is what reaches the terminal, whichever library
+decided to write it. Real failures are unaffected: they reach the client on the
+error channel, and the ones that end a session come back through `Exited`.
 
 ### No authentication, by design
 

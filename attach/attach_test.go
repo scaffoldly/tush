@@ -3,7 +3,9 @@ package attach
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -118,6 +120,78 @@ func TestReleasesAfterAbruptDisconnect(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// TestRefusalIsQuiet checks that turning a second client away writes nothing to
+// the terminal the publisher is sitting at.
+//
+// The streaming library is kubelet's, and logs the way kubelet does: to stderr,
+// addressed to whoever runs a cluster. Here that is somebody's shell. A second
+// person opening the URL while one is attached is contention working correctly,
+// and it arrived on the publisher's screen as "Unhandled Error" followed by a
+// socket-receive error — for an outcome that is not an error and that the
+// client is already told about over the protocol.
+func TestRefusalIsQuiet(t *testing.T) {
+	host := startHost(t)
+
+	first, _ := attachTo(t, host)
+	defer first.CloseNow()
+
+	// Let the first client take the console before crowding it.
+	time.Sleep(300 * time.Millisecond)
+
+	said := captureStderr(t, func() {
+		second, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
+			Subprotocols: []string{"v4.channel.k8s.io"},
+		})
+		if err == nil {
+			// Read until the far end gives up on us, which is when the refusal
+			// has been fully processed and anything it logs has been written.
+			for {
+				if _, _, err := second.Read(t.Context()); err != nil {
+					break
+				}
+			}
+			second.CloseNow()
+		}
+		time.Sleep(300 * time.Millisecond)
+	})
+
+	if said != "" {
+		t.Errorf("refusing a second client wrote to the publisher's terminal:\n%s", said)
+	}
+}
+
+// captureStderr returns whatever the process writes to stderr while f runs.
+//
+// The real descriptor is swapped rather than a logger reconfigured, because
+// what matters is what reaches the terminal, whichever library decided to write
+// it and however it got hold of the stream.
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	saved := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = saved }()
+
+	read := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		read <- buf.String()
+	}()
+
+	f()
+
+	w.Close()
+	out := <-read
+	r.Close()
+	return out
 }
 
 // startHost runs a console, a shell on it, and the attach endpoint, returning

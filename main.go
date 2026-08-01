@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,10 +15,12 @@ import (
 	"github.com/scaffoldly/tush/attach"
 	"github.com/scaffoldly/tush/client"
 	"github.com/scaffoldly/tush/console"
+	"github.com/scaffoldly/tush/debug"
 	"github.com/scaffoldly/tush/progress"
 	"github.com/scaffoldly/tush/queue"
 	"github.com/scaffoldly/tush/shell"
 	"github.com/scaffoldly/tush/tunnel"
+	"github.com/scaffoldly/tush/web"
 )
 
 var version = "dev"
@@ -95,12 +98,14 @@ func host(ctx context.Context, bin string) int {
 	report.Step("Requesting tunnel...")
 
 	tun := tunnel.New(ctx, provider)
-	server := &http.Server{Handler: srv.Handler()}
+	server := &http.Server{Handler: logged(routes(srv))}
 	go server.Serve(tun.Listener())
 	go func() {
 		<-ctx.Done()
 		server.Close()
 	}()
+
+	local := serveLocally(server)
 
 	// A hostname is minted before the edge routes to it, so a URL handed over
 	// the moment it exists is one the first client may fail to reach. Wait for
@@ -112,6 +117,10 @@ func host(ctx context.Context, bin string) int {
 
 	fmt.Fprintf(os.Stderr, "Attach from another machine with:\n\n")
 	fmt.Fprintf(os.Stderr, "    %s %s\n\n", bin, address)
+	fmt.Fprintf(os.Stderr, "or open that URL in a browser.\n")
+	if local != "" {
+		fmt.Fprintf(os.Stderr, "Locally, the same page is at %s\n", local)
+	}
 	if !routed {
 		fmt.Fprintf(os.Stderr, "The tunnel is not answering yet; it may need another moment.\n")
 	}
@@ -124,6 +133,58 @@ func host(ctx context.Context, bin string) int {
 	case <-ctx.Done():
 		return exitInterrupted
 	}
+}
+
+// routes puts the attach endpoint and the browser page behind one address.
+//
+// They are two views of the same session, so which one a request gets is
+// decided here rather than inside either. The page is the catch-all: a browser
+// that has landed anywhere under this URL wants a terminal.
+func routes(srv *attach.Server) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle(attach.Path, srv.Handler())
+	mux.Handle("/", web.Handler())
+	return mux
+}
+
+// serveLocally opens a second listener onto the same handler when one has been
+// asked for, and reports where, or an empty string if none is running.
+//
+// Reaching the page without a tunnel round trip is what makes the browser side
+// workable to develop: the tunnel stays up and remains the real path, but a
+// stylesheet does not need one to look at. It is off unless an address is
+// named, because the whole point of tush is that a shell is reachable only
+// through a URL somebody chose to hand out, and a listener that appeared by
+// default would quietly add a second way in.
+func serveLocally(server *http.Server) string {
+	addr := debug.Listen()
+	if addr == "" {
+		return ""
+	}
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		// Not fatal. The tunnel is what actually matters, and losing a
+		// convenience should not stop a session from being published.
+		fmt.Fprintf(os.Stderr, "tush: not listening on %s: %v\n", addr, err)
+		return ""
+	}
+
+	go server.Serve(ln)
+	return "http://" + ln.Addr().String() + "/"
+}
+
+// logged reports what was asked for, when logging is on. Without it, a page
+// that does not work is indistinguishable between never having been fetched and
+// having been fetched and then failed.
+func logged(next http.Handler) http.Handler {
+	if !debug.Logging() {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		debug.Logf("%s %s", r.Method, r.URL.RequestURI())
+		next.ServeHTTP(w, r)
+	})
 }
 
 // waitForEdge reports whether the published address reaches this process.
