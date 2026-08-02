@@ -32,7 +32,7 @@ func TestPageStartsNoShell(t *testing.T) {
 		return status, nil
 	})
 
-	handler := routes(srv)
+	handler := routes(srv, func() {})
 	for _, path := range []string{"/", "/assets/tush.js", "/somewhere/else"} {
 		resp := httptest.NewRecorder()
 		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
@@ -56,7 +56,7 @@ func TestRoutesKeepTheEndpoint(t *testing.T) {
 
 	handler := routes(attach.New(con, func(string) (<-chan int, error) {
 		return make(chan int, 1), nil
-	}))
+	}), func() {})
 
 	// A request selecting no streams is refused by the attach endpoint and by
 	// nothing else, so a 400 is proof of which handler answered. It is the same

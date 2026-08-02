@@ -124,6 +124,7 @@ halves:
 | `/`            | `web.Handler()` — the page                       |
 | `/assets/…`    | `web.Handler()` — the embedded files             |
 | `/favicon.ico` | `web.Handler()` — the icon, explicitly           |
+| `POST /stop`   | `web.Handler()` — ends the session; POST only    |
 | `/attach`      | `attach.Server` — unchanged                      |
 
 `attach.Server.Handler()` stops building its own mux and returns just the
@@ -179,13 +180,24 @@ read them from there.
 `term.onBinary` is also wired to channel 0: xterm emits it for the few inputs
 that are not valid UTF-8 text, and dropping them would silently lose keys.
 
-Two deliberate differences from the CLI client:
+One deliberate difference from the CLI client: **`TERM=xterm-256color`**, which
+is what xterm.js honestly implements, where the CLI forwards whatever the
+user's terminal claims.
 
-- **`TERM=xterm-256color`**, which is what xterm.js honestly implements. The
-  CLI forwards whatever the user's terminal claims.
-- **No Ctrl+P Ctrl+Q.** Closing the tab is the detach, and the host already
-  treats a client going away as a detach. Binding a chord in a browser fights
-  the browser for no gain.
+**Ctrl+P Ctrl+Q detaches**, as it does from the terminal client. This was
+originally left out, on the reasoning that closing the tab already detaches and
+that binding a chord in a browser fights the browser. That was wrong on both
+counts: the muscle memory comes from the CLI and its absence reads as a bug,
+and detaching to the card is better than closing the tab because reconnecting
+is then one click.
+
+`splitDetach` is ported to JavaScript rather than reimplemented, and the bytes
+come from `attach.DetachPrefix`/`DetachSuffix` rather than being written out
+again, so the same chord means the same thing in a tab and in a terminal. The
+subtlety worth keeping is that a trailing Ctrl+P is *held* until the next key
+decides what it meant — that is what leaves a lone Ctrl+P working as
+history-previous. Ctrl+P is also the browser's print shortcut, so the page
+suppresses that default while still letting the terminal have the key.
 
 Keys the browser reserves — Ctrl+W, Ctrl+N, Cmd+W — cannot be delivered. That
 is a limitation of the medium, not something to work around.
@@ -215,11 +227,40 @@ Mounting the terminal before connecting rather than after means it is already
 at its final size when the shell writes its opening prompt. Swapping the
 layout at click time would race that first paint against a reflow.
 
-The overlay returns, with the reason and a **Reconnect** button, when the
-socket closes or the error channel reports the shell exited.
+The button says **Attach**, which is what the protocol calls it and what the
+terminal client does, rather than Connect or Reconnect — one word for one act,
+whether it is the first time or the fourth.
+
+While attached, two buttons sit in the top-right corner over the terminal,
+faded until pointed at, because the shell should keep the whole window and a
+permanent pair of controls in the corner covers output. They are hidden when
+nothing is attached: neither does anything then, and a Stop button on a page
+nobody has connected from is an invitation to press it.
+
+**Detach** leaves the shell running, the same as the chord. **Stop** ends the
+session and the tunnel for everyone, and takes two presses — the first arms it,
+and it disarms itself after four seconds. One click in the corner of a window
+somebody is typing into is not enough for something with no way back.
+
+Stop is not a capability the URL did not already carry: anyone who can attach
+can type `exit`, which stops the tunnel identically. What matters is that it
+cannot fire without a person. It is a `POST`, and that is the whole guard —
+unfurlers, crawlers, prefetchers and syncing history issue GETs against URLs
+nobody deliberately visited, and a `GET` route would hand a kill switch to all
+of them. A `GET` falls through to the page instead.
+
+The teardown reuses the Ctrl+C path rather than being a second one to keep
+correct: the stop cancels the context, which kills the shell and closes the
+server exactly as a signal does. The handler answers and flushes before
+triggering it, since the teardown closes every connection including the one
+carrying the reply.
+
+The overlay returns, with the reason and an **Attach** button, when the socket
+closes or the error channel reports the shell exited. After a Stop it returns
+with no way back, because there is nothing left to attach to.
 
 If xterm.js never loads — a blocked CDN, an outage, or an integrity mismatch —
-the Connect button is disabled and the card says the terminal library could not
+the Attach button is disabled and the card says the terminal library could not
 be loaded and that `tush <url>` still works. That is checked by testing for the
 `Terminal` global once the page has loaded, which catches all three causes,
 since a failed integrity check leaves the script unexecuted exactly as a failed
@@ -369,6 +410,11 @@ Committed Go tests:
   because what matters is what reaches the terminal, whichever library decided
   to write it.
 - **Neither way of asking for an icon renders the page.**
+- **Only a `POST` ends the session**, a cross-origin one is refused, and a
+  `POST` does end it — so that the first check is guarding a live route rather
+  than a missing one.
+- **The two clients agree on the detach chord**, which nothing else would catch:
+  detaching is a client-side concern the server never sees.
 
 Per [CLAUDE.md](../../../CLAUDE.md), each of these is confirmed able to fail
 before it is reported as passing. That is not a formality here: an earlier
@@ -414,6 +460,9 @@ lie](../../../CONTRIBUTING.md#terminal-echo-makes-tests-lie).
 
 - Authentication of any kind.
 - Evicting an attached client in favour of a new one.
+- Any control that grants more than the URL already does. Stop is in because
+  `exit` was already equivalent; anything that is not would need the boundary
+  reopening rather than a button.
 - Copy and paste affordances, themes, font settings, a toolbar.
 - Mobile and touch keyboard support.
 - Committing a Playwright suite or adding Node to CI.

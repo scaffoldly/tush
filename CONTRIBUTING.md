@@ -205,6 +205,22 @@ behind it, because what protects the user is what reaches the browser. Note that
 `html/template` escapes the `+` in a base64 hash to `&#43;`; browsers decode
 attribute values, so this is correct, and the test decodes the same way.
 
+### Ending a session takes a POST, and that is the whole guard
+
+The browser page can stop a session outright, tunnel included. That is not a new
+capability — anyone who can attach can type `exit` — but it must take a person
+deciding to.
+
+Unfurlers, crawlers, prefetchers and syncing browser history all issue GETs
+against URLs nobody deliberately visited. A `GET` route for
+[`web.StopPath`](./web/web.go) would hand every one of them the ability to end
+somebody's session by looking at a link. Keep the route `POST`-only; a `GET`
+falls through to the page, which is the harmless outcome.
+
+`TestOnlyAPostStops` guards it, and the handler answers and flushes *before*
+triggering the teardown, because the teardown closes every connection including
+the one carrying the reply.
+
 ### The streaming library logs to the user's terminal
 
 It is kubelet's code and logs the way kubelet does — to stderr, which here is

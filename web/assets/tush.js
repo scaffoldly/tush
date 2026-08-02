@@ -16,6 +16,14 @@
   var overlay = document.getElementById("overlay");
   var message = document.getElementById("message");
   var connect = document.getElementById("connect");
+  var tools = document.getElementById("tools");
+  var detachButton = document.getElementById("detach");
+  var stopButton = document.getElementById("stop");
+
+  // How long the Stop button stays armed before forgetting it was pressed.
+  // Long enough to mean it, short enough that an armed button is not left
+  // sitting there to be hit by accident later.
+  var STOP_ARMED_MS = 4000;
 
   var encoder = new TextEncoder();
   var decoder = new TextDecoder();
@@ -62,6 +70,26 @@
 
   var socket = null;
 
+  // Set when the session is being left on purpose, so that the close it causes
+  // is reported as what it was rather than as the connection dropping.
+  var farewell = null;
+
+  // Set once the session has been stopped outright, which nothing recovers
+  // from: the shell has gone and so has the tunnel.
+  var stopped = false;
+
+  // leave ends the session without ending the shell, which is the whole point
+  // of the detach sequence: the far end sees a client go away and keeps
+  // running, and Reconnect picks the same shell back up.
+  function leave(reason) {
+    farewell = reason;
+    if (socket) {
+      socket.close(1000, "detached");
+    } else {
+      offer(reason);
+    }
+  }
+
   // Report the size whenever it changes, but only while attached: the host has
   // nowhere to put a size for a session that does not exist yet.
   term.onResize(function (size) {
@@ -84,8 +112,58 @@
     }
   }
 
+  // A trailing Ctrl+P, kept back until the next key says whether it began the
+  // detach sequence or was a keystroke in its own right. This is what lets a
+  // lone Ctrl+P still reach the shell as history-previous.
+  var held = "";
+
   term.onData(function (data) {
-    send(config.channels.stdin, encoder.encode(data));
+    var typed = held + data;
+    held = "";
+
+    var split = splitDetach(typed);
+    held = split.held;
+
+    if (split.send) {
+      send(config.channels.stdin, encoder.encode(split.send));
+    }
+    if (split.detach) {
+      leave("Detached. The shell is still running.");
+    }
+  });
+
+  // splitDetach separates what should reach the host from the detach sequence
+  // and from one still in progress. A port of the function of the same name in
+  // client/client.go — the two clients have to take the same keys out of the
+  // stream, or the same chord would mean different things in a tab and a
+  // terminal.
+  function splitDetach(typed) {
+    var prefix = String.fromCharCode(config.detach.prefix);
+    var suffix = String.fromCharCode(config.detach.suffix);
+
+    for (var i = 0; i < typed.length; i++) {
+      if (typed[i] !== prefix) {
+        continue;
+      }
+      if (i === typed.length - 1) {
+        return { send: typed.slice(0, i), detach: false, held: prefix };
+      }
+      if (typed[i + 1] === suffix) {
+        return { send: typed.slice(0, i), detach: true, held: "" };
+      }
+    }
+    return { send: typed, detach: false, held: "" };
+  }
+
+  // Ctrl+P is the browser's print shortcut, and a print dialog opening halfway
+  // through detaching would be its own problem. Returning true still lets the
+  // terminal handle the key, which is what turns it into the byte above.
+  term.attachCustomKeyEventHandler(function (e) {
+    var chord = e.ctrlKey && !e.altKey && !e.metaKey;
+    if (chord && e.type === "keydown" && (e.key === "p" || e.key === "q")) {
+      e.preventDefault();
+    }
+    return true;
   });
 
   // Input that is not valid UTF-8 text arrives here instead, as a string of
@@ -102,9 +180,79 @@
     attach(0);
   });
 
+  detachButton.addEventListener("click", function () {
+    leave("Detached. The shell is still running.");
+  });
+
+  // Stop takes two presses. It ends the session and the tunnel for everybody,
+  // and the URL does not come back — too much to hang on a single click in the
+  // corner of a window somebody is typing into.
+  var armed = null;
+
+  stopButton.addEventListener("click", function () {
+    if (armed === null) {
+      armed = setTimeout(disarm, STOP_ARMED_MS);
+      stopButton.classList.add("arming");
+      stopButton.textContent = "Really stop?";
+      return;
+    }
+    disarm();
+    halt();
+  });
+
+  function disarm() {
+    if (armed !== null) {
+      clearTimeout(armed);
+      armed = null;
+    }
+    stopButton.classList.remove("arming");
+    stopButton.textContent = "Stop";
+  }
+
+  // halt ends the session for everyone. The far end answers and then tears
+  // itself down, so the socket closing is the expected outcome rather than a
+  // failure, and there is nothing left to attach to afterwards.
+  function halt() {
+    stopButton.disabled = true;
+    detachButton.disabled = true;
+
+    fetch(config.stop, { method: "POST", cache: "no-store" }).then(
+      function (response) {
+        if (!response.ok) {
+          stopButton.disabled = false;
+          detachButton.disabled = false;
+          leave("The session could not be stopped.");
+          return;
+        }
+        farewell = null;
+        finish(
+          "Session stopped. The shell has ended and this URL is no longer live."
+        );
+        if (socket) {
+          socket.close(1000, "stopped");
+        }
+      },
+      function () {
+        stopButton.disabled = false;
+        detachButton.disabled = false;
+        leave("The session could not be stopped.");
+      }
+    );
+  }
+
+  // finish shows the card with no way back, for the one ending that is final.
+  function finish(reason) {
+    stopped = true;
+    tools.hidden = true;
+    say(escapeHTML(reason));
+    connect.disabled = true;
+    connect.textContent = "Stopped";
+    overlay.hidden = false;
+  }
+
   function attach(attempt) {
     connect.disabled = true;
-    connect.textContent = "Connecting...";
+    connect.textContent = "Attaching...";
 
     var endpoint = new URL(config.endpoint, location.href);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
@@ -127,6 +275,8 @@
       term.reset();
 
       overlay.hidden = true;
+      tools.hidden = false;
+      disarm();
       term.focus();
       refit();
 
@@ -164,6 +314,22 @@
         clearInterval(keepAlive);
       }
       socket = null;
+      tools.hidden = true;
+
+      // The session was ended outright. The card already says so, and there is
+      // nothing left to attach to.
+      if (stopped) {
+        return;
+      }
+
+      // Left on purpose. Not a failure, and not something to retry.
+      if (farewell !== null) {
+        var said = farewell;
+        farewell = null;
+        held = "";
+        offer(said);
+        return;
+      }
 
       // Somebody else holds the console. If this is a refreshed tab racing the
       // server's cleanup of its own previous socket, waiting briefly is enough.
@@ -224,7 +390,7 @@
   function offer(reason) {
     say(escapeHTML(reason));
     connect.disabled = false;
-    connect.textContent = "Reconnect";
+    connect.textContent = "Attach";
     overlay.hidden = false;
   }
 

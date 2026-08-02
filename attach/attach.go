@@ -55,6 +55,22 @@ const (
 	ChannelResize = 4
 )
 
+// DetachPrefix and DetachSuffix are Ctrl+P then Ctrl+Q, the sequence docker
+// attach uses, and the way out of a session that is not ending it.
+//
+// They are a client's concern rather than the server's — the server sees a
+// client leaving and nothing more — but both clients have to take the same pair
+// out of the input stream, and a browser tab that detached on a different chord
+// than the terminal would be its own kind of surprise.
+//
+// A pair rather than a single key, because any single key worth pressing is
+// already spoken for. Only the pair is taken; a lone Ctrl+P reaches the shell
+// like anything else, which is what keeps it working as history-previous.
+const (
+	DetachPrefix = 0x10
+	DetachSuffix = 0x11
+)
+
 // KeepAlive is how often a client should send a byte of nothing when the user
 // is not typing. A terminal is idle most of the time, and an intermediary will
 // drop a connection it believes has gone quiet — Cloudflare's edge does so

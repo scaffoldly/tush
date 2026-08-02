@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/scaffoldly/tush/attach"
 )
@@ -210,6 +212,14 @@ func TestConfigMatchesTheProtocol(t *testing.T) {
 	if got.Busy == "" {
 		t.Error("the page cannot tell a busy console from any other failure, so it will not retry a refresh")
 	}
+
+	// The same chord in a tab as in a terminal. Detaching is a client-side
+	// concern the server never sees, so nothing else would catch the two
+	// clients drifting onto different keys.
+	wantDetach := detach{Prefix: attach.DetachPrefix, Suffix: attach.DetachSuffix}
+	if got.Detach != wantDetach {
+		t.Errorf("detach = %+v, want %+v", got.Detach, wantDetach)
+	}
 }
 
 // configJSON returns the configuration block as the browser would read it.
@@ -339,9 +349,76 @@ func TestNoIconRequestRendersThePage(t *testing.T) {
 	}
 }
 
+// TestOnlyAPostStops is the check that keeps the Stop button from being a kill
+// switch for anything that follows a link.
+//
+// Ending the session is not a new capability — anyone who can attach can type
+// exit — but it must take a person deciding to. Unfurlers, crawlers,
+// prefetchers and history sync all issue GETs, and a GET route would hand every
+// one of them the ability to end somebody's session by looking at the URL.
+func TestOnlyAPostStops(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		var stopped bool
+		handler := Handler(func() { stopped = true })
+
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(method, StopPath, nil))
+
+		// Whatever it answers with, it must not have stopped anything. The
+		// stop is deliberately asynchronous, so allow for that before deciding.
+		time.Sleep(2 * stopDelay)
+		if stopped {
+			t.Errorf("a %s of %s ended the session", method, StopPath)
+		}
+	}
+}
+
+// TestPostStops checks the button actually works, so that the test above is
+// guarding a live route rather than a missing one.
+func TestPostStops(t *testing.T) {
+	stopped := make(chan struct{})
+	var once sync.Once
+	handler := Handler(func() { once.Do(func() { close(stopped) }) })
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodPost, StopPath, nil))
+
+	if resp.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	}
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a POST did not end the session")
+	}
+}
+
+// TestStopRefusesAnotherOrigin checks a cross-site fetch is turned away. Not
+// load-bearing — whoever knows the URL can post to it directly — but there is
+// no reason to accept one.
+func TestStopRefusesAnotherOrigin(t *testing.T) {
+	var stopped bool
+	handler := Handler(func() { stopped = true })
+
+	req := httptest.NewRequest(http.MethodPost, StopPath, nil)
+	req.Header.Set("Origin", "https://somewhere.example")
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.Code, http.StatusForbidden)
+	}
+	time.Sleep(2 * stopDelay)
+	if stopped {
+		t.Error("a cross-origin post ended the session")
+	}
+}
+
 func get(t *testing.T, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	resp := httptest.NewRecorder()
-	Handler().ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+	Handler(func() {}).ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
 	return resp
 }

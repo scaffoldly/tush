@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,6 +35,10 @@ const provider = "tunnel.pizza"
 // edgeTimeout bounds how long to wait for a freshly minted hostname to start
 // routing before handing the URL over anyway.
 const edgeTimeout = 30 * time.Second
+
+// shutdownGrace bounds how long to wait for the shell to die after a stop was
+// asked for, before giving up and going anyway.
+const shutdownGrace = 5 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -75,6 +80,16 @@ func host(ctx context.Context, bin string) int {
 		return 1
 	}
 
+	// Stopping from the browser winds down the same way Ctrl+C does — the
+	// cancelled context kills the shell and closes the server — rather than
+	// being a second teardown path that has to be kept correct separately.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stopped := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(stopped) }) }
+
 	con, err := console.Open()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", bin, err)
@@ -98,7 +113,7 @@ func host(ctx context.Context, bin string) int {
 	report.Step("Requesting tunnel...")
 
 	tun := tunnel.New(ctx, provider)
-	server := &http.Server{Handler: logged(routes(srv))}
+	server := &http.Server{Handler: logged(routes(srv, stop))}
 	go server.Serve(tun.Listener())
 	go func() {
 		<-ctx.Done()
@@ -130,6 +145,16 @@ func host(ctx context.Context, bin string) int {
 	select {
 	case status := <-srv.Exited():
 		return status
+	case <-stopped:
+		fmt.Fprintf(os.Stderr, "\nStopped from the browser.\n")
+		// Cancelling kills the shell; wait for it rather than closing the
+		// terminal out from under a process still holding it.
+		cancel()
+		select {
+		case <-srv.Exited():
+		case <-time.After(shutdownGrace):
+		}
+		return 0
 	case <-ctx.Done():
 		return exitInterrupted
 	}
@@ -140,10 +165,10 @@ func host(ctx context.Context, bin string) int {
 // They are two views of the same session, so which one a request gets is
 // decided here rather than inside either. The page is the catch-all: a browser
 // that has landed anywhere under this URL wants a terminal.
-func routes(srv *attach.Server) http.Handler {
+func routes(srv *attach.Server, stop func()) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(attach.Path, srv.Handler())
-	mux.Handle("/", web.Handler())
+	mux.Handle("/", web.Handler(stop))
 	return mux
 }
 

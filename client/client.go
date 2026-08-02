@@ -48,17 +48,12 @@ var shellExited, shellExitedFormat = func() (string, string) {
 // typing. The reason it has to happen at all is in attach.KeepAlive.
 const keepAliveInterval = attach.KeepAlive
 
-// detachPrefix and detachSuffix are Ctrl+P then Ctrl+Q, the sequence docker
-// attach uses. A raw terminal forwards Ctrl+C to the host rather than stopping
-// the client, so there has to be some other way out.
-//
-// A pair rather than a single key, because any single key worth pressing is
-// already spoken for: Ctrl+D is end of input and half-page-scroll, and some
-// terminals swallow it before it arrives at all. Only the pair is taken; a
-// lone Ctrl+P reaches the host like anything else.
+// detachPrefix and detachSuffix are Ctrl+P then Ctrl+Q. A raw terminal forwards
+// Ctrl+C to the host rather than stopping the client, so there has to be some
+// other way out; why it is a pair, and why it lives in attach, is there.
 const (
-	detachPrefix = 0x10
-	detachSuffix = 0x11
+	detachPrefix = attach.DetachPrefix
+	detachSuffix = attach.DetachSuffix
 )
 
 // Client is a dumb terminal attached to a shell on the far end of a tunnel.

@@ -152,11 +152,87 @@
         color: var(--dim);
         cursor: not-allowed;
       }
+
+      #hint {
+        margin: 0.9rem 0 0;
+        font-size: 0.72rem;
+        color: var(--dim);
+      }
+
+      /*
+        Over the terminal rather than beside it, so the shell keeps the whole
+        window. Faded until pointed at: what is underneath is what the user came
+        for, and a permanent pair of buttons in the corner of a terminal is one
+        more thing covering output.
+      */
+      #tools {
+        position: absolute;
+        top: 0.55rem;
+        right: 0.7rem;
+        display: flex;
+        gap: 0.4rem;
+        opacity: 0.35;
+        transition: opacity 120ms ease;
+      }
+
+      #tools:hover,
+      #tools:focus-within {
+        opacity: 1;
+      }
+
+      #tools[hidden] {
+        display: none;
+      }
+
+      #tools button {
+        padding: 0.28rem 0.65rem;
+        border: 1px solid var(--edge);
+        border-radius: 6px;
+        background: var(--card);
+        color: var(--dim);
+        font: inherit;
+        font-size: 0.74rem;
+        cursor: pointer;
+      }
+
+      #tools button:hover {
+        color: var(--text);
+        border-color: var(--dim);
+      }
+
+      /* Armed, waiting for the second press. */
+      #stop.arming {
+        background: var(--warn);
+        border-color: var(--warn);
+        color: #1a0d02;
+        font-weight: 650;
+      }
+
+      #hint kbd {
+        padding: 0.1rem 0.32rem;
+        border: 1px solid var(--edge);
+        border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95em;
+      }
     </style>
   </head>
 
   <body>
     <div id="screen"></div>
+
+    <!--
+      Only while attached: neither does anything otherwise, and a Stop button on
+      a page nobody has connected from is an invitation to press it.
+    -->
+    <div id="tools" hidden>
+      <button id="detach" type="button" title="Leave the shell running">
+        Detach
+      </button>
+      <button id="stop" type="button" title="End the session and the tunnel">
+        Stop
+      </button>
+    </div>
 
     <div id="overlay">
       <div id="card">
@@ -166,7 +242,13 @@
           This is a shell on somebody else's machine, running as them. Anyone
           holding this URL gets it.
         </p>
-        <button id="connect" type="button">Connect</button>
+        <button id="connect" type="button">Attach</button>
+        <!--
+          A chord nobody can guess is a chord nobody uses, and this is the only
+          place there is to say so — once connected the card is gone and the
+          terminal belongs to the shell.
+        -->
+        <p id="hint"><kbd>Ctrl+P</kbd> <kbd>Ctrl+Q</kbd> detaches</p>
       </div>
     </div>
 

@@ -74,8 +74,16 @@ and leave it running, or `exit` to end it — which also stops the tunnel.
 
 Opening the URL gives a page with a terminal on it and nothing connected. It
 stays that way until you press **Connect**: fetching the page must be inert,
-because plenty of things fetch URLs without a person involved. Closing the tab
-is how you detach.
+because plenty of things fetch URLs without a person involved.
+
+**Ctrl+P Ctrl+Q** detaches, the same as it does from the terminal client, and
+leaves you on the card with an Attach button. Closing the tab detaches too, and
+so does the **Detach** button in the corner.
+
+Beside it is **Stop**, which ends the session and the tunnel for everyone — the
+URL does not come back. It takes two presses. It is not a power the URL did not
+already carry: anyone who can attach can type `exit`, which does the same
+thing. The button only makes it obvious.
 
 One client at a time, whichever kind. A browser tab and a `tush` client contend
 for the same shell, and the second one to arrive is told the console is busy.
@@ -110,8 +118,10 @@ blunt about what that means: pasting it somewhere is closer to pasting a
 password than to pasting a link, and a chat client that previews links or a
 history that syncs between devices carries it further than you intended.
 
-What the page does about it: it attaches nothing until you press Connect, so
-fetching it — by an unfurler, a crawler, a preview — opens no session. It
+What the page does about it: it attaches nothing until you press Attach, so
+fetching it — by an unfurler, a crawler, a preview — opens no session, and
+ending the session takes a `POST`, so nothing that merely follows a link can do
+it either. It
 carries no link preview metadata worth showing, asks not to be indexed, is
 served `no-store` so it does not sit in a shared cache, and sends no referrer,
 so the URL is not handed to anything the page loads. None of that is

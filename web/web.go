@@ -26,6 +26,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/scaffoldly/tush/attach"
 	"github.com/scaffoldly/tush/console"
@@ -50,15 +51,68 @@ var embedded embed.FS
 // Handler serves the page and the small amount of JavaScript that drives it.
 // Everything else the page needs comes from a CDN, pinned by hash — see
 // assets.go.
-func Handler() http.Handler {
+//
+// stop ends the whole session, tunnel included. It is a capability handed to
+// whoever holds the URL, which sounds worse than it is: anyone who can attach
+// can already type exit, and that stops the tunnel too. A button only makes it
+// obvious.
+func Handler(stop func()) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+assetPrefix+"{file}", serveAsset)
 	// Explicitly, because otherwise it reaches the catch-all below and a
 	// browser asking for an icon is served the whole page — which it then
 	// discards, having asked for an image.
 	mux.HandleFunc("GET /favicon.ico", serveIcon)
+	mux.HandleFunc("POST "+StopPath, stopper(stop))
 	mux.HandleFunc("GET /", servePage)
 	return mux
+}
+
+// StopPath ends the session.
+const StopPath = "/stop"
+
+// stopDelay is how long to wait after answering before pulling the session
+// down, so that the answer is out of the door first. The teardown closes every
+// connection, this one included.
+const stopDelay = 250 * time.Millisecond
+
+// stopper ends the session on request.
+//
+// POST rather than GET, and that is the whole security story here. The URL is
+// the credential, so anyone who can reach this could equally attach and type
+// exit; what must not happen is a session ending because something that is not
+// a person fetched a link. Unfurlers, crawlers and prefetchers issue GETs, and
+// a GET route would hand every one of them a kill switch. A GET falls through
+// to the page instead.
+//
+// The Origin check costs a line and turns away a cross-site fetch. It is not
+// load-bearing — an attacker who knows the URL does not need another site to
+// do this from — but there is no reason to accept one.
+func stopper(stop func()) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r.Host) {
+			http.Error(w, "cross-origin request", http.StatusForbidden)
+			return
+		}
+
+		harden(w)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+
+		debug.Logf("stopping at the browser's request")
+		go func() {
+			time.Sleep(stopDelay)
+			stop()
+		}()
+	}
+}
+
+func sameOrigin(origin, host string) bool {
+	u, err := url.Parse(origin)
+	return err == nil && u.Host == host
 }
 
 // serveIcon answers the request a browser makes on its own initiative, whatever
@@ -183,6 +237,15 @@ type config struct {
 	Channels         channels `json:"channels"`
 	KeepAliveSeconds int      `json:"keepAliveSeconds"`
 	Busy             string   `json:"busy"`
+	Detach           detach   `json:"detach"`
+	Stop             string   `json:"stop"`
+}
+
+// detach is the key sequence that leaves a session running, as the terminal
+// client takes it, so that both clients take the same one.
+type detach struct {
+	Prefix int `json:"prefix"`
+	Suffix int `json:"suffix"`
 }
 
 type channels struct {
@@ -215,7 +278,9 @@ func settings() config {
 		KeepAliveSeconds: int(attach.KeepAlive.Seconds()),
 		// So the page can tell "somebody else is attached" — worth retrying —
 		// from a failure that is not.
-		Busy: console.ErrBusy.Error(),
+		Busy:   console.ErrBusy.Error(),
+		Detach: detach{Prefix: attach.DetachPrefix, Suffix: attach.DetachSuffix},
+		Stop:   StopPath,
 	}
 }
 
