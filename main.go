@@ -8,9 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	buildinfo "runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/scaffoldly/tush/attach"
 	"github.com/scaffoldly/tush/client"
@@ -44,7 +47,7 @@ func main() {
 	defer stop()
 
 	args := queue.New(os.Args)
-	bin := filepath.Base(args.Shift())
+	bin := invocation(args.Shift())
 	arg := args.Shift()
 
 	switch arg {
@@ -68,6 +71,61 @@ func main() {
 		WithURL(target).
 		WithStdio(os.Stdin, os.Stdout, os.Stderr).
 		Run())
+}
+
+// envCommand lets a launcher say how tush was actually invoked.
+const envCommand = "TUSH_COMMAND"
+
+// invocation is what to call tush when telling the user what to run.
+//
+// The command tush prints is meant to be typed on another machine, so it has to
+// be one that exists there. Its own name is `tush` however it was reached,
+// which is wrong for the two ways of running it that install nothing:
+// `npx @scaffoldly/tush`, where there is no `tush` on the far end either, and
+// `go run`, where the binary is in a build directory that will be gone shortly.
+//
+// A launcher that knows better says so through the environment; otherwise this
+// works it out from where the binary is.
+func invocation(argv0 string) string {
+	if name := os.Getenv(envCommand); name != "" {
+		// Printed to a terminal, so reduce it to characters that only draw
+		// themselves. It is the caller's own environment, but a command hint is
+		// no place to find escape sequences.
+		return strings.Map(func(r rune) rune {
+			if unicode.IsGraphic(r) || r == ' ' {
+				return r
+			}
+			return -1
+		}, name)
+	}
+
+	if underGoRun(argv0) {
+		return "go run " + modulePath() + "@latest"
+	}
+	return filepath.Base(argv0)
+}
+
+// underGoRun reports whether this binary was built by `go run`, which compiles
+// into a temporary directory and deletes it afterwards. The binary is named
+// tush either way, so the name alone cannot tell that apart from an install.
+//
+// There is no API that answers this — the build info a Go binary carries says
+// how it was built, not how it was launched — so it is read from where the
+// executable ended up.
+func underGoRun(argv0 string) bool {
+	dir := filepath.Dir(argv0)
+	return filepath.Base(dir) == "exe" && strings.Contains(dir, "go-build")
+}
+
+// modulePath is where tush can be fetched from, taken from the build info the
+// binary already carries rather than written out again. This module has been
+// renamed once; a copy here would have survived that rename and started telling
+// people to install something that no longer exists.
+func modulePath() string {
+	if info, ok := buildinfo.ReadBuildInfo(); ok && info.Main.Path != "" {
+		return info.Main.Path
+	}
+	return "github.com/scaffoldly/tush"
 }
 
 // host publishes a tunnel and serves the shell behind it. The shell runs on a

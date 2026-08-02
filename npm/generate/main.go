@@ -62,6 +62,7 @@ func main() {
 		dist    = flag.String("dist", "dist", "directory holding the built binaries")
 		out     = flag.String("out", filepath.Join("dist", "npm"), "where to write the packages")
 		shim    = flag.String("shim", filepath.Join("npm", "shim.js"), "the wrapper's executable")
+		readme  = flag.String("readme", "README.md", "what the npm page shows")
 		version = flag.String("version", "", "version to publish, with or without a leading v")
 	)
 	flag.Parse()
@@ -93,7 +94,7 @@ func main() {
 		fmt.Printf("  %s (%s/%s)\n", name, b.goos, b.goarch)
 	}
 
-	if err := writeWrapper(*out, *shim, semver, names); err != nil {
+	if err := writeWrapper(*out, *shim, *readme, semver, names); err != nil {
 		fatal("%v", err)
 	}
 	fmt.Printf("  %s\n", wrapperName)
@@ -177,7 +178,7 @@ func writePlatform(out string, b build, version string) (string, error) {
 
 // writeWrapper writes the package a user actually asks for. It carries no
 // binary — only the shim, and the list of packages that do.
-func writeWrapper(out, shim, version string, platforms []string) error {
+func writeWrapper(out, shim, readme, version string, platforms []string) error {
 	dir := filepath.Join(out, binaryName)
 
 	optional := map[string]string{}
@@ -194,7 +195,7 @@ func writeWrapper(out, shim, version string, platforms []string) error {
 		"homepage":    repository,
 		"keywords":    []string{"shell", "terminal", "tunnel", "tty", "remote", "ssh"},
 		"bin":         map[string]string{binaryName: "bin/" + binaryName},
-		"files":       []string{"bin/"},
+		"files":       []string{"bin/", "README.md"},
 		// Exact versions: a range here would let a wrapper pair with a binary it
 		// was never built alongside.
 		"optionalDependencies": optional,
@@ -205,6 +206,13 @@ func writeWrapper(out, shim, version string, platforms []string) error {
 	}
 
 	if err := writeJSON(filepath.Join(dir, "package.json"), manifest); err != nil {
+		return err
+	}
+	// The project's own README, so that the npm page says what tush is rather
+	// than "This package does not have a README". It is the page most people
+	// arriving through npx will see first, and npm rewrites relative links
+	// against the repository field above.
+	if err := copyFile(readme, filepath.Join(dir, "README.md"), 0o644); err != nil {
 		return err
 	}
 	return copyFile(shim, filepath.Join(dir, "bin", binaryName), 0o755)

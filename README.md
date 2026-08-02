@@ -69,13 +69,17 @@ any other machine:
 ```
 Attach from another machine with:
 
-    tush https://<hostname>.tunneled.pizza/
+    npx @scaffoldly/tush https://<hostname>.tunneled.pizza/
 
 or open that URL in a browser.
 
 Anyone with that URL gets a shell as you.
 Press Ctrl+C to stop the tunnel.
 ```
+
+The command it prints is the one you used to start it — `tush` if it is
+installed, `npx @scaffoldly/tush` if you got here through npx — because it is
+meant to be typed on the other machine, where `tush` may not exist either.
 
 You are now on a shell on the first machine. Press **Ctrl+P Ctrl+Q** to detach
 and leave it running, or `exit` to end it — which also stops the tunnel.

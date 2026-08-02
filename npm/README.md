@@ -62,6 +62,23 @@ The release workflow does the same thing with the binaries it just built,
 attested and signed, then publishes. Nothing rebuilds downstream: the binary
 inside the npm package is the same one inside the archive on the release.
 
+## Telling the user what to type
+
+tush prints a command to run on the *other* machine. Its own name is `tush`
+however it was reached, which is wrong for anyone who got here through npx and
+installed nothing.
+
+So the shim sets **`TUSH_COMMAND`**, which `invocation()` in
+[`main.go`](../main.go) prefers over the program's own name. It says
+`npx @scaffoldly/tush` only when npm reports `npm_command=exec` — set by `npx`
+and `npm exec`, and absent when a globally installed bin runs directly, where
+`tush` really is the right answer.
+
+`go run` is handled separately and without help: the binary sits in a
+`go-build…/exe/` directory that is about to be deleted, so tush recognises that
+and says `go run <module>@latest` instead, taking the module path from its own
+build info.
+
 ## Things that bite
 
 - **`spawnSync`, not `execFileSync`.** The latter throws on a non-zero exit, and

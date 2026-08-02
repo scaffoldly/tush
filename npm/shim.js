@@ -49,10 +49,24 @@ function binary() {
   }
 }
 
+// What the user typed, so that tush can tell them what to type again. It prints
+// a command to run on the other machine, and its own name is `tush` however it
+// was reached — which is not a command anyone has when they got here through
+// npx and installed nothing.
+//
+// npm sets npm_command=exec for `npx` and for `npm exec`, and nothing at all
+// when a globally installed bin is run directly. So the absence of it means the
+// command really is `tush`.
+const invocation =
+  process.env.npm_command === "exec" ? "npx @scaffoldly/tush" : "tush";
+
 // spawnSync rather than execFileSync: execFileSync throws on a non-zero exit,
 // and tush's exit status is meaningful — it carries the status the published
 // shell ended with. Throwing would replace that with a stack trace.
-const result = spawnSync(binary(), process.argv.slice(2), { stdio: "inherit" });
+const result = spawnSync(binary(), process.argv.slice(2), {
+  stdio: "inherit",
+  env: { ...process.env, TUSH_COMMAND: invocation },
+});
 
 if (result.error) {
   fail(String(result.error.message || result.error));

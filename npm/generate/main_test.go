@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,13 @@ func TestWrapperInstallsAnywhere(t *testing.T) {
 	if bin, ok := wrapper["bin"].(map[string]any); !ok || bin["tush"] == nil {
 		t.Errorf("the wrapper has no tush command, so npx has nothing to run: %v", wrapper["bin"])
 	}
+
+	// Without this the npm page reads "This package does not have a README",
+	// which is the first thing most people arriving through npx will see.
+	files, _ := wrapper["files"].([]any)
+	if !slices.Contains(files, any("README.md")) {
+		t.Errorf("the wrapper does not ship a README: files = %v", files)
+	}
 }
 
 // TestShimNamesThePackagesThatAreBuilt is the one that guards the seam between
@@ -149,7 +157,10 @@ func generate(t *testing.T, dist, version string) string {
 	out := filepath.Join(t.TempDir(), "npm")
 
 	cmd := exec.Command("go", "run", ".",
-		"-dist", dist, "-out", out, "-shim", filepath.Join("..", "shim.js"), "-version", version)
+		"-dist", dist, "-out", out,
+		"-shim", filepath.Join("..", "shim.js"),
+		"-readme", filepath.Join("..", "..", "README.md"),
+		"-version", version)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate failed: %v\n%s", err, output)
 	}
