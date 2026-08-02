@@ -27,6 +27,7 @@ Deep-link by filename; line numbers will drift.
 | Tunnel publication                        | [`tunnel/tunnel.go`](./tunnel/tunnel.go)                                   |
 | Argument queue                            | [`queue/queue.go`](./queue/queue.go)                                       |
 | Live tests against a real tunnel          | [`e2e/e2e_test.go`](./e2e/e2e_test.go)                                     |
+| npm packaging (wrapper shim, generator)   | [`npm/`](./npm)                                                            |
 | Build / lint / test commands              | [`Makefile`](./Makefile)                                                   |
 | CI matrix                                 | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)                   |
 | Release (build + sign + publish)          | [`.github/workflows/release.yaml`](./.github/workflows/release.yaml)       |
@@ -91,6 +92,7 @@ make dev-stop   # stop it
 make dev-log    # what it has been asked for (N=200 for more)
 make dev-url    # just the URL
 make web-sri    # check the pinned CDN assets against their recorded hashes
+make npm-packages  # build the npm packages into dist/npm
 ```
 
 ### Working on the browser page
@@ -310,10 +312,29 @@ than one green test here has been measuring the echo rather than the shell.
 ## Releases
 
 Pushing to `main` releases. The workflow bumps the patch version from the
-latest tag, creates a draft, cross-compiles for macOS and Linux, and signs each
-archive with keyless cosign plus SLSA build provenance. A commit whose message
-contains `[skip release]` alone on a line is not released; a manual `vX.Y.Z`
-tag releases as itself, for minor and major bumps.
+latest tag, cross-compiles for macOS and Linux, signs each archive with keyless
+cosign plus SLSA build provenance, publishes a GitHub release, and publishes to
+npm. A commit whose message contains `[skip release]` alone on a line is not
+released; a manual `vX.Y.Z` tag releases as itself, for minor and major bumps.
+
+Each platform is built **once**. The archive on the release and the binary
+inside the npm package are the same bytes, so every way of getting tush leads
+back to one build that was attested and signed.
+
+Two things about the shape of that workflow are load-bearing:
+
+- **The release is published, not drafted.** It used to leave a draft called
+  `next`, overwritten every push and never given a version — so the archives
+  lived only on that draft, and the tags that existed (`v0.0.1`, `v0.0.2`)
+  carried no assets at all. Nothing was ever actually released.
+- **npm publishing is a job in the same workflow, not a workflow triggered by
+  the release.** A release created with `GITHUB_TOKEN` does not trigger further
+  workflows, so an `on: release: published` job would never run. It goes last
+  because it is the only irreversible step: a published npm version can be
+  deprecated but never replaced.
+
+Both the release step and the npm step tolerate already having run, so a job
+that failed partway can be re-run once the cause is fixed.
 
 Verify an archive:
 

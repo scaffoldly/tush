@@ -1,4 +1,4 @@
-.PHONY: all check fmt fmt-check vet build test e2e binary dist run dev dev-start dev-stop dev-log dev-url web-sri clean
+.PHONY: all check fmt fmt-check vet build test e2e binary dist run dev dev-start dev-stop dev-log dev-url npm-packages web-sri clean
 
 # tush is pure Go. Forcing CGO off keeps every build identical across hosts and
 # makes the binary static and dependency-free, so it can be dropped into a
@@ -17,7 +17,7 @@ export CGO_ENABLED = 0
 BINARY = tush
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GO_LDFLAGS = -s -w -X main.version=$(VERSION)
-PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+PLATFORMS = linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64
 
 # Where `make dev-start` keeps its log and process id, and how long it waits for
 # the tunnel to start routing. Both files are gitignored.
@@ -129,6 +129,13 @@ dev-log:
 dev-url:
 	@grep -oE 'https://[a-z0-9]+\.tunneled\.pizza/' $(DEV_LOG) 2>/dev/null | head -1 \
 		|| { echo "no URL in $(DEV_LOG); run make dev-start"; exit 1; }
+
+# Build the npm packages into dist/npm: one per platform carrying that
+# platform's binary, plus the wrapper a user installs. Needs `make dist` first,
+# since the platforms come from what is actually in dist/ rather than from a
+# third copy of the build matrix.
+npm-packages: dist
+	@go run ./npm/generate -version "$(VERSION)"
 
 # Check that the third-party assets the browser page loads still hash to what
 # web/assets.go records, and print the hash for each so a version bump can be

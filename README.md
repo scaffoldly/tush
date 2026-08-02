@@ -36,6 +36,16 @@ brew tap scaffoldly/tap
 brew install tush
 ```
 
+**npx** — no install at all:
+
+```sh
+npx @scaffoldly/tush
+```
+
+Node is the only thing needed, and it is only a launcher: npm fetches the
+prebuilt binary for your platform and runs it. Nothing is compiled, and no
+install script downloads anything.
+
 **Go**:
 
 ```sh

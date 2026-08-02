@@ -1,5 +1,15 @@
 name: release
 
+# Pushing to main releases.
+#
+# The version is the previous tag with its patch bumped, or the tag itself when
+# one is pushed by hand for a minor or major. Every platform is built once, and
+# those exact bytes are what gets attested, signed, attached to the release and
+# published to npm — nothing downstream rebuilds.
+#
+# It used to leave a draft called `next`, overwritten on every push and never
+# given a version. Nothing was ever released by it: the archives lived only on
+# that draft, and the tags that did exist carried no assets at all.
 on:
   workflow_dispatch:
   push:
@@ -10,114 +20,240 @@ on:
       - '**/*.go'
       - go.*
       - Makefile
+      - npm/**
     tags:
       - v*
-  # No pull_request trigger: the draft is push-gated, so a PR build can't
-  # release, and ci.yml already validates that the code compiles.
+  # No pull_request trigger: releasing is push-gated, and ci.yml already
+  # validates that the code compiles.
 
 concurrency:
-  # Queue rather than cancel: a canceled run mid-publish can strand a
-  # half-populated draft release or leave assets unsigned.
+  # Queue rather than cancel. A cancelled run can leave a tag with no assets, or
+  # platform packages on npm with no wrapper naming them.
   cancel-in-progress: false
   group: ${{ github.workflow }}--${{ github.ref }}
 
 jobs:
-  create:
+  # What is being released, and whether to release at all.
+  version:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     outputs:
-      draft-release-name: ${{ steps.create-draft-release.outputs.draft-release-name }}
-    permissions:
-      contents: write
+      version: ${{ steps.decide.outputs.version }}
+      release: ${{ steps.decide.outputs.release }}
     steps:
-      - if: github.event_name == 'push'
-        id: create-draft-release
-        uses: int128/go-release-action/create-draft-release@9e1d6ec29fc6ffc2ba55f631baf4a73017d228e1 # v2.5.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Tags are what the next version is counted from, so a shallow clone
+          # would start again from zero every time.
+          fetch-depth: 0
+
+      - id: decide
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          # A tag pushed by hand releases as itself. That is how minor and major
+          # bumps happen; nothing here can work them out on its own.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # [skip release] alone on a line, so that it cannot be triggered by a
+          # commit merely discussing one.
+          if printf '%s' "${MESSAGE:-}" | grep -qx '\[skip release\]'; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "skipping: the commit message asks for it"
+            exit 0
+          fi
+
+          latest=$(git tag --list 'v*.*.*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            next=v0.0.1
+          else
+            rest=${latest#v}
+            major=${rest%%.*}
+            rest=${rest#*.}
+            minor=${rest%%.*}
+            patch=${rest#*.}
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "releasing ${next} (previous tag: ${latest:-none})"
 
   build:
-    needs: create
+    needs: version
+    if: needs.version.outputs.release == 'true'
     strategy:
       matrix:
         # No Windows: the host puts the shell on a pseudo-terminal and hands it
         # a controlling terminal for job control, which Windows has no
         # equivalent of. tush cross-compiles for it, but nothing would work.
         platform:
-          - runs-on: ubuntu-latest
-            GOOS: linux
-            GOARCH: amd64
-          - runs-on: ubuntu-latest
-            GOOS: linux
-            GOARCH: arm64
-          - runs-on: ubuntu-latest
-            GOOS: linux
-            GOARCH: arm
-          - runs-on: macos-latest
-            GOOS: darwin
-            GOARCH: amd64
-          - runs-on: macos-latest
-            GOOS: darwin
-            GOARCH: arm64
-    runs-on: ${{ matrix.platform.runs-on }}
+          - { GOOS: linux, GOARCH: amd64 }
+          - { GOOS: linux, GOARCH: arm64 }
+          - { GOOS: linux, GOARCH: arm }
+          - { GOOS: darwin, GOARCH: amd64 }
+          - { GOOS: darwin, GOARCH: arm64 }
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GOOS: ${{ matrix.platform.GOOS }}
       GOARCH: ${{ matrix.platform.GOARCH }}
       CGO_ENABLED: 0
-    timeout-minutes: 10
+      NAME: tush_${{ matrix.platform.GOOS }}_${{ matrix.platform.GOARCH }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      # go-release-action archives a pre-built binary and uploads it — it does
-      # not build, and has no ldflags input — so build here, cross-compiling per
-      # GOOS/GOARCH with the version injected. -s -w strip the symbol table and
-      # DWARF; the version is the tag, which is what `tush version` reports.
-      # -o names the binary tush, which is what the action expects.
-      - run: >-
-          go build
-          -ldflags "-s -w -X main.version=${{ needs.create.outputs.draft-release-name }}"
-          -o tush .
-      - uses: int128/go-release-action@9e1d6ec29fc6ffc2ba55f631baf4a73017d228e1 # v2.5.0
-        with:
-          binary: tush
-          release-name: ${{ needs.create.outputs.draft-release-name }}
 
-  # After every platform archive is uploaded to the draft, sign each one:
-  # keyless cosign (proves who published) plus SLSA build provenance (attests
-  # how/where it was built).
-  sign:
-    needs: [create, build]
-    if: github.event_name == 'push'
+      # -s -w strip the symbol table and DWARF; -trimpath drops host paths so
+      # the build does not depend on where it happened. The version is what
+      # `tush version` reports.
+      - name: build
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ needs.version.outputs.version }}" \
+            -o "dist/${NAME}" .
+
+      # The archive is what a person downloads; the bare binary beside it is
+      # what the npm packages carry. Both come from the one build above, so
+      # every route to tush leads to the same bytes.
+      - name: archive
+        run: |
+          set -euo pipefail
+          cd dist
+          cp "${NAME}" tush
+          zip -q "${NAME}.zip" tush
+          rm tush
+          sha256sum "${NAME}.zip" > "${NAME}.zip.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.NAME }}
+          path: dist/
+          retention-days: 1
+
+  publish:
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      contents: write # download + upload release assets
-      id-token: write # cosign keyless signing + provenance OIDC
+      contents: write # create the tag and the release
+      id-token: write # cosign keyless, SLSA provenance, npm provenance
       attestations: write # SLSA build provenance
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ needs.create.outputs.draft-release-name }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - name: download release archives
-        run: |
-          mkdir -p dist
-          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --dir dist --pattern '*'
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Artifacts come back without the executable bit, and npm publishes a file
+      # exactly as it finds it — a binary without +x installs fine and then
+      # cannot run.
+      - name: restore the executable bit
+        run: |
+          set -euo pipefail
+          chmod +x dist/tush_*_* 2>/dev/null || true
+          # Only the bare binaries; the archives alongside them are not run.
+          chmod -x dist/*.zip dist/*.sha256
+          ls -l dist
+
+      # Attest what was built before anything is published, so the attestation
+      # covers the artifacts as they leave the builder.
       - name: attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: dist/*
+          subject-path: dist/*.zip
 
-      - name: install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: sign archives and upload bundles
+      - name: sign the archives
         run: |
           set -euo pipefail
-          # cosign writes each .sigstore next to its archive; attestation
-          # already ran, so dist/ still holds only the archives here.
-          for f in dist/*; do
+          for f in dist/*.zip dist/*.sha256; do
             cosign sign-blob --yes --bundle "${f}.sigstore" "$f"
           done
-          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/*.sigstore
+
+      # Creating the release also creates the tag, at this commit. It is
+      # published rather than drafted: a draft is how this used to end up with
+      # tags carrying no assets and assets belonging to no version.
+      - name: publish the release
+        run: |
+          set -euo pipefail
+          assets=(dist/*.zip dist/*.sha256 dist/*.sigstore)
+
+          # Tolerate the release already existing, so that a run which got this
+          # far and then failed at npm can simply be re-run.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "$VERSION exists; replacing its assets"
+            gh release upload "$VERSION" "${assets[@]}" --clobber
+          else
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --generate-notes \
+              --target "$GITHUB_SHA" \
+              "${assets[@]}"
+          fi
+
+      # npm last, because it is the only step that cannot be undone: a published
+      # version can be deprecated but never replaced. Everything above is
+      # repeatable, so if this fails the job can be re-run once the cause is
+      # fixed.
+      #
+      # It is here rather than in a workflow of its own because a release
+      # created with GITHUB_TOKEN does not trigger further workflows, so an
+      # `on: release: published` job would simply never run.
+      - name: build the npm packages
+        run: go run ./npm/generate -version "$VERSION"
+
+      - name: publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Platform packages first: the wrapper names each of them as an
+          # optional dependency, and a wrapper published ahead of them would
+          # briefly resolve to nothing.
+          #
+          # --provenance ties each package to this workflow and this commit,
+          # which is npm's counterpart to the cosign signature and SLSA
+          # attestation the archives carry.
+          publish() {
+            name=$(node -p "require('./$1/package.json').name")
+            # Already there means a re-run, not a failure. npm cannot replace a
+            # published version, so this is the only way a re-run gets past it.
+            if npm view "${name}@${VERSION#v}" version >/dev/null 2>&1; then
+              echo "${name}@${VERSION#v} is already published"
+              return
+            fi
+            echo "publishing ${name}"
+            npm publish "$1" --access public --provenance
+          }
+
+          for package in dist/npm/tush-*; do
+            publish "$package"
+          done
+          publish dist/npm/tush
