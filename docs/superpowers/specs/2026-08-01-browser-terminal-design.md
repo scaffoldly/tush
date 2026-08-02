@@ -88,11 +88,33 @@ The property already holds on the server side — `attach.Server.shell()` starts
 the shell lazily on the first attach rather than at boot — and this change must
 not break it. It gets an explicit test rather than an assumption.
 
-### One client at a time is unchanged
+### One client at a time, and the newest one wins
 
-`console.Attach` returns `ErrBusy` when a client is already attached, and that
-reaches the browser on the error channel. Evicting an incumbent would be a
-semantic change and is out of scope.
+This was originally left alone: `console.Attach` returned `ErrBusy` to a second
+client, and evicting an incumbent was called out of scope. Driving it in a
+browser changed the assessment. Refusing the newcomer makes something as
+ordinary as refreshing a tab fail, because the tab races the server noticing
+that its own previous connection has died, and the retry ladder that softened
+that was covering for the semantics rather than fixing them.
+
+So the newcomer takes the console and the incumbent ends with `ErrEvicted`.
+Nothing is given away: whoever can take the console this way could instead
+attach and type `exit`, which ends the session outright rather than
+interrupting it. It is also a net deletion — the retry ladder, the busy marker
+in the rendered configuration, and the branch that softened the message all
+existed only to soften an error that no longer happens.
+
+Two things this must get right, and both are in the tests:
+
+- An evicted client stops reaching the terminal. Its copying goroutine outlives
+  the eviction, and anything in flight would land in the new client's shell.
+- A client that loses the console does not reconnect by itself. Two tabs left
+  open would otherwise evict each other indefinitely.
+
+Sharing the console between clients is still out of scope, and for a reason
+that does not go away: a pty has one window size, so two differently-sized
+clients cannot both be drawn correctly without a virtual screen in between —
+which is what tmux is, and what tush deliberately is not.
 
 ## Architecture
 
@@ -266,10 +288,10 @@ be loaded and that `tush <url>` still works. That is checked by testing for the
 since a failed integrity check leaves the script unexecuted exactly as a failed
 request does. The failure must never be a blank screen with a dead button.
 
-A busy result is retried twice with a short backoff before it reaches the
-overlay. A refreshed tab can genuinely lose a race against the server noticing
-that the previous socket died, and the retry covers that window without
-changing the one-client-at-a-time semantics.
+Losing the console to another client puts the card back saying so, with the
+shell noted as still running. The page never reattaches on its own: it has just
+been replaced, and taking the console straight back would leave two open tabs
+evicting each other for as long as both were running.
 
 ## Security
 
@@ -405,11 +427,13 @@ Committed Go tests:
   `crossorigin` disables checking without any visible symptom — so the rendered
   HTML is asserted on directly rather than the constants behind it.
 - **`GET /` starts no shell.** This is the load-bearing unfurler property.
-- **An abruptly dropped client releases the console**, so a reconnect succeeds
-  rather than meeting `ErrBusy` forever. Already covered by
-  `TestReleasesAfterAbruptDisconnect`, whose polling loop also shows the release
-  is not instant — which is what the page's busy retry exists for.
-- **Refusing a second client writes nothing to the publisher's terminal.** The
+- **An abruptly dropped client releases the console**, so a reconnect succeeds.
+  Already covered by `TestReleasesAfterAbruptDisconnect`.
+- **A newcomer takes the console, and the client it replaced can no longer type
+  into it.** The second half is the one that needed care: the first version of
+  that assertion watched the evicted client's own screen, where stray input
+  would never appear anyway, and passed against code that had no guard at all.
+- **Replacing a client writes nothing to the publisher's terminal.** The
   test swaps the real stderr descriptor rather than reconfiguring a logger,
   because what matters is what reaches the terminal, whichever library decided
   to write it.

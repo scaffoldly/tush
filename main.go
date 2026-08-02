@@ -122,7 +122,13 @@ func host(ctx context.Context, bin string) int {
 	// A hostname is minted before the edge routes to it, so a URL handed over
 	// the moment it exists is one the first client may fail to reach. Wait for
 	// the round trip to land here before calling it ready.
-	address := tun.URL()
+	address, err := tun.URL()
+	if err != nil {
+		report.Stop()
+		fmt.Fprintf(os.Stderr, "%s: could not publish a tunnel: %v\n", bin, err)
+		return 1
+	}
+
 	report.Step("Connecting to tunnel...")
 	routed := waitForEdge(ctx, address)
 	report.Stop()

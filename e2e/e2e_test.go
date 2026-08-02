@@ -131,7 +131,10 @@ func publish(t *testing.T) *url.URL {
 		}
 	})
 
-	raw := tun.URL()
+	raw, err := tun.URL()
+	if err != nil {
+		t.Fatalf("could not publish a tunnel: %v", err)
+	}
 	t.Logf("published at %s", raw)
 	u, err := url.Parse(raw)
 	if err != nil {

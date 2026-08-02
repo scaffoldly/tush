@@ -85,8 +85,11 @@ URL does not come back. It takes two presses. It is not a power the URL did not
 already carry: anyone who can attach can type `exit`, which does the same
 thing. The button only makes it obvious.
 
-One client at a time, whichever kind. A browser tab and a `tush` client contend
-for the same shell, and the second one to arrive is told the console is busy.
+One client at a time, whichever kind, and the newest one wins. A browser tab and
+a `tush` client contend for the same shell; whoever arrives last gets it, and
+whoever had it is told so and can attach again. Nobody is turned away — losing
+the shell this way costs you nothing but the trip back, and anyone who could
+take it could equally have typed `exit`.
 
 `tush version` and `tush help` do what they look like.
 

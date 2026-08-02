@@ -179,13 +179,36 @@ terminal in a mode whose closing bytes were discarded. `console.remember` trims
 at a line boundary because escape sequences do not span lines. Keep it that
 way.
 
-### One client at a time, and output is never held
+### One client at a time, the newest one wins, and output is never held
 
 The console has a single reader fanning output out to whichever client is
-attached; a second concurrent attach gets `ErrBusy`. Output produced while
-nobody is attached is **dropped**, not buffered — otherwise a shell left
-running with no client would fill the terminal's buffer and block on its own
-output. The scrollback is what recovers it on reattach.
+attached. A second attach **takes** the console rather than being refused, and
+the client that had it ends with `ErrEvicted`.
+
+The alternative — refusing the newcomer — is what this used to do, and it made
+refreshing a browser tab fail, because the tab raced the server noticing that
+its own previous connection had died. Nothing is given away by letting the
+newcomer in: anyone able to take the console this way could instead attach and
+type `exit`, which ends the session outright.
+
+Two things follow, and both are load-bearing:
+
+- **An evicted client must stop reaching the terminal.** Its copying goroutine
+  outlives the eviction by however long the connection takes to tear down, and
+  anything still in flight would land in the *new* client's shell. `keystrokes`
+  in [`console`](./console/console.go) is what stops it.
+- **A client that loses the console must not reconnect by itself.** Two tabs
+  left open would evict each other for as long as both were running. Coming
+  back has to be somebody pressing a button.
+
+Why only one at a time at all: a pty has exactly one window size, so two
+clients on differently-sized windows cannot both be drawn correctly without a
+virtual screen in between — which is what tmux and screen are, and what tush
+deliberately is not.
+
+Output produced while nobody is attached is **dropped**, not buffered —
+otherwise a shell left running with no client would fill the terminal's buffer
+and block on its own output. The scrollback is what recovers it on reattach.
 
 ### The client keeps the connection warm
 
@@ -249,9 +272,9 @@ the one carrying the reply.
 ### The streaming library logs to the user's terminal
 
 It is kubelet's code and logs the way kubelet does — to stderr, which here is
-the terminal somebody published a shell from. A second person hitting a busy
-console produced `"Unhandled Error"` on the publisher's screen, for contention
-working exactly as intended.
+the terminal somebody published a shell from. One client replacing another
+produced `"Unhandled Error"` on the publisher's screen, for something entirely
+ordinary.
 
 Silencing it takes three separate things, and the middle one is the trap:
 

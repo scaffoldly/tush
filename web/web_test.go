@@ -209,8 +209,8 @@ func TestConfigMatchesTheProtocol(t *testing.T) {
 	if got.KeepAliveSeconds != int(attach.KeepAlive.Seconds()) {
 		t.Errorf("keepAliveSeconds = %d, want %d", got.KeepAliveSeconds, int(attach.KeepAlive.Seconds()))
 	}
-	if got.Busy == "" {
-		t.Error("the page cannot tell a busy console from any other failure, so it will not retry a refresh")
+	if got.Evicted == "" {
+		t.Error("the page cannot tell being replaced by another client from a real failure")
 	}
 
 	// The same chord in a tab as in a terminal. Detaching is a client-side

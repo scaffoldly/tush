@@ -28,12 +28,6 @@
   var encoder = new TextEncoder();
   var decoder = new TextDecoder();
 
-  // How many times a busy console is retried before it reaches the overlay. A
-  // refreshed tab can lose a race against the server noticing that its own
-  // previous socket died, and that window is short.
-  var BUSY_RETRIES = 2;
-  var BUSY_BACKOFF_MS = 350;
-
   // The emulator comes from a CDN and is pinned by hash, so it can fail to
   // arrive three ways: the network blocked it, the CDN was down, or what
   // arrived did not match the hash and the browser refused to run it. All three
@@ -177,7 +171,7 @@
   });
 
   connect.addEventListener("click", function () {
-    attach(0);
+    attach();
   });
 
   detachButton.addEventListener("click", function () {
@@ -250,7 +244,7 @@
     overlay.hidden = false;
   }
 
-  function attach(attempt) {
+  function attach() {
     connect.disabled = true;
     connect.textContent = "Attaching...";
 
@@ -331,15 +325,10 @@
         return;
       }
 
-      // Somebody else holds the console. If this is a refreshed tab racing the
-      // server's cleanup of its own previous socket, waiting briefly is enough.
-      if (isBusy(reason) && attempt < BUSY_RETRIES) {
-        setTimeout(function () {
-          attach(attempt + 1);
-        }, BUSY_BACKOFF_MS * (attempt + 1));
-        return;
-      }
-
+      // Never reconnect on its own. Somebody else now has the console, and a
+      // page that reattached by itself would take it straight back — two tabs
+      // left open would evict each other for as long as both were running.
+      // Coming back has to be somebody deciding to.
       offer(humanise(reason) || "The connection closed.");
     };
 
@@ -381,23 +370,23 @@
     }
   }
 
-  function isBusy(reason) {
-    return reason !== null && reason.indexOf(config.busy) !== -1;
+  function wasEvicted(reason) {
+    return reason !== null && reason.indexOf(config.evicted) !== -1;
   }
 
   // humanise turns what the protocol says into something worth reading.
   //
   // The wire format is kubelet's, and it describes the world as kubelet sees
-  // it. A second person opening the URL was being told "Internal error
-  // occurred: error attaching to container: console already has a client
-  // attached" — which is not an internal error, has no container in it, and
-  // buries the one fact that matters.
+  // it: losing the console arrives as "Internal error occurred: error
+  // attaching to container: another client attached" — which is not an
+  // internal error, has no container in it, and buries the one fact that
+  // matters.
   function humanise(reason) {
     if (reason === null) {
       return null;
     }
-    if (isBusy(reason)) {
-      return "Somebody else is attached to this shell. Only one at a time.";
+    if (wasEvicted(reason)) {
+      return "Somebody else attached to this shell. It is still running.";
     }
     // Whatever else it says, it is not an internal error from where the reader
     // is sitting.

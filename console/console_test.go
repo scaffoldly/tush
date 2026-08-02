@@ -107,24 +107,46 @@ func TestReplayClearsStyle(t *testing.T) {
 	con.remember([]byte("\x1b[31mstill red\n"))
 
 	var screen bytes.Buffer
-	if err := con.claim(&screen); err != nil {
-		t.Fatal(err)
-	}
+	con.claim(&screen)
 	if !bytes.HasPrefix(screen.Bytes(), sgrReset) {
 		t.Errorf("replay does not start by clearing style: %q", screen.Bytes())
 	}
 }
 
-// TestOneClientAtATime checks that a second client cannot attach on top of the
-// first and steal half its output.
-func TestOneClientAtATime(t *testing.T) {
+// TestNewClientEvictsTheOld checks that a console has one client at a time and
+// that it is the newest one: arriving takes the console rather than being
+// refused, and the client that had it is told its attachment is over.
+func TestNewClientEvictsTheOld(t *testing.T) {
 	con := open(t)
 	runShell(t, con)
-	attach(t, con)
 
-	err := con.Attach(t.Context(), strings.NewReader(""), io.Discard)
-	if err != ErrBusy {
-		t.Errorf("second attach returned %v, want %v", err, ErrBusy)
+	first, firstScreen := attach(t, con)
+	_, secondScreen := attach(t, con)
+
+	select {
+	case err := <-secondScreen.done:
+		t.Fatalf("the newcomer's attachment ended with %v; it should have taken the console", err)
+	case <-time.After(300 * time.Millisecond):
+		// Still attached, which is the point.
+	}
+
+	// The first client's attachment ends, and says why.
+	select {
+	case err := <-firstScreen.done:
+		if err != ErrEvicted {
+			t.Errorf("evicted client ended with %v, want %v", err, ErrEvicted)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the evicted client was never told it had lost the console")
+	}
+
+	// And it can no longer type into the session it lost. What it types would
+	// land in the shell the newcomer now holds, so that is the screen to watch:
+	// the evicted client is no longer being shown anything itself.
+	fmt.Fprintln(first, "echo st''rayinput")
+	time.Sleep(500 * time.Millisecond)
+	if strings.Contains(secondScreen.String(), "strayinput") {
+		t.Errorf("an evicted client still reached the terminal:\n%s", secondScreen.String())
 	}
 }
 
@@ -213,8 +235,8 @@ func attach(t *testing.T, con *Console) (io.Writer, *sink) {
 func attachWith(t *testing.T, con *Console, ctx context.Context) (io.Writer, *sink) {
 	t.Helper()
 	inR, inW := io.Pipe()
-	screen := &sink{}
-	go con.Attach(ctx, inR, screen)
+	screen := &sink{done: make(chan error, 1)}
+	go func() { screen.done <- con.Attach(ctx, inR, screen) }()
 
 	// Give the attach time to claim the console, so that a caller which types
 	// immediately is not writing into a terminal nobody is watching.
@@ -227,6 +249,10 @@ func attachWith(t *testing.T, con *Console, ctx context.Context) (io.Writer, *si
 type sink struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
+
+	// done carries how this client's attachment ended, so a test can tell being
+	// evicted from simply going away.
+	done chan error
 }
 
 func (s *sink) Write(p []byte) (int, error) {

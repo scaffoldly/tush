@@ -9,7 +9,6 @@ require (
 
 require (
 	github.com/creack/pty v1.1.24
-	k8s.io/apimachinery v0.36.3
 	k8s.io/cri-streaming v0.36.3
 	k8s.io/klog/v2 v2.140.0
 )
@@ -88,6 +87,6 @@ require (
 )
 
 require (
-	github.com/cnuss/libtunnel v0.0.38
+	github.com/cnuss/libtunnel v0.0.39
 	golang.org/x/sys v0.47.0 // indirect
 )

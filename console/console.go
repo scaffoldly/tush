@@ -18,9 +18,20 @@ const (
 	defaultCols = 80
 )
 
-// ErrBusy is returned when a client tries to attach to a console that already
-// has one.
-var ErrBusy = errors.New("console already has a client attached")
+// ErrEvicted is what an attachment ends with when another client took the
+// console from it.
+//
+// A console has one client at a time, and the newcomer wins. Refusing the
+// newcomer instead would be the other choice, and was what this did: it made
+// something as ordinary as refreshing a browser tab fail, because the tab
+// raced the server noticing that its own previous connection had died. Whoever
+// arrives last is also the one with their hands on the keyboard.
+//
+// Nothing is given away by letting them in. The URL is the only credential
+// there is, so anyone able to take the console this way could instead attach
+// normally and type exit, which ends the session outright rather than
+// interrupting it.
+var ErrEvicted = errors.New("another client attached")
 
 // scrollback is how much recent output a console remembers, to replay to a
 // client when it attaches. Enough to carry a screen or two of a full-screen
@@ -45,7 +56,7 @@ type Console struct {
 	tty    *os.File
 
 	mu      sync.Mutex
-	display io.Writer
+	current *viewer
 	history []byte
 
 	// Resizes arrive from whichever client is attached and can land at any
@@ -53,6 +64,27 @@ type Console struct {
 	masterMu  sync.Mutex
 	closed    bool
 	closeOnce sync.Once
+}
+
+// viewer is one attached client: where its output goes, and a way to tell it
+// that somebody else has taken the console.
+type viewer struct {
+	out     io.Writer
+	evicted chan struct{}
+	once    sync.Once
+}
+
+func (v *viewer) evict() {
+	v.once.Do(func() { close(v.evicted) })
+}
+
+func (v *viewer) gone() bool {
+	select {
+	case <-v.evicted:
+		return true
+	default:
+		return false
+	}
 }
 
 func Open() (*Console, error) {
@@ -90,8 +122,8 @@ func (c *Console) paint() {
 		if n > 0 {
 			c.mu.Lock()
 			c.remember(buf[:n])
-			if c.display != nil {
-				c.display.Write(buf[:n])
+			if c.current != nil {
+				c.current.out.Write(buf[:n])
 			}
 			c.mu.Unlock()
 		}
@@ -130,37 +162,64 @@ func fromLineStart(history []byte) []byte {
 }
 
 // Attach makes out the console's display and feeds it whatever arrives on in,
-// until the client goes away or the context ends. The shell is left running
-// either way.
+// until the client goes away, another client takes the console, or the context
+// ends. The shell is left running in every case.
 func (c *Console) Attach(ctx context.Context, in io.Reader, out io.Writer) error {
-	if err := c.claim(out); err != nil {
-		return err
-	}
-	defer c.release()
+	v := c.claim(out)
+	defer c.release(v)
 
 	typed := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(c.master, in)
+		_, err := io.Copy(keystrokes{c, v}, in)
 		typed <- err
 	}()
 
 	select {
 	case err := <-typed:
+		if v.gone() {
+			return ErrEvicted
+		}
 		return err
+	case <-v.evicted:
+		return ErrEvicted
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// claim makes out the display, first replaying what the shell has said
-// recently so that the client arrives at a screen with something on it rather
-// than waiting for the shell to speak again.
-func (c *Console) claim(out io.Writer) error {
+// keystrokes carries one client's input to the terminal, and stops the moment
+// that client stops being the attached one.
+//
+// Without this, a client being evicted would go on typing into the session it
+// had just lost: its copying goroutine outlives the eviction by however long
+// the connection takes to tear down, and anything already in flight would land
+// in the new client's shell.
+type keystrokes struct {
+	c *Console
+	v *viewer
+}
+
+func (k keystrokes) Write(p []byte) (int, error) {
+	if k.v.gone() {
+		return 0, ErrEvicted
+	}
+	return k.c.master.Write(p)
+}
+
+// claim makes out the display, taking the console from whoever held it. It
+// first replays what the shell has said recently, so that the client arrives
+// at a screen with something on it rather than waiting for the shell to speak
+// again.
+func (c *Console) claim(out io.Writer) *viewer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.display != nil {
-		return ErrBusy
+
+	// The newcomer wins. Whoever was here is told so, and stops being sent
+	// output before the replay below goes to their replacement.
+	if c.current != nil {
+		c.current.evict()
 	}
+
 	if len(c.history) > 0 {
 		// The scrollback resumes partway through a session, so whatever colour
 		// or style was in force before it is not in the replay. Clear it rather
@@ -168,14 +227,19 @@ func (c *Console) claim(out io.Writer) error {
 		out.Write(sgrReset)
 		out.Write(c.history)
 	}
-	c.display = out
-	return nil
+
+	c.current = &viewer{out: out, evicted: make(chan struct{})}
+	return c.current
 }
 
-func (c *Console) release() {
+// release gives up the console, unless somebody else has already taken it —
+// in which case it is theirs, not ours to clear.
+func (c *Console) release(v *viewer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.display = nil
+	if c.current == v {
+		c.current = nil
+	}
 }
 
 // Resize sets the window size that programs see.

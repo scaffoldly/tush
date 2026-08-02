@@ -6,6 +6,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/scaffoldly/tush/attach"
+	"github.com/scaffoldly/tush/console"
 )
 
 // exitInterrupted is the conventional status for a client killed by a signal.
@@ -175,6 +177,13 @@ func (c *Client) render(conn *websocket.Conn) int {
 		case channelStderr:
 			c.stderr.Write(payload)
 		case channelError:
+			// Losing the console to a newer client is an ordinary end to a
+			// session rather than a failure, so say so and leave successfully.
+			// Otherwise it reads as the connection dropping for no reason.
+			if bytes.Contains(payload, []byte(console.ErrEvicted.Error())) {
+				fmt.Fprintf(c.stderr, "\r\nSomebody else attached; the shell is still running.\r\n")
+				return 0
+			}
 			return exitStatus(payload)
 		}
 	}

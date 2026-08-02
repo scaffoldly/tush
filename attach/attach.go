@@ -12,14 +12,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
 	"k8s.io/klog/v2"
 
 	"github.com/scaffoldly/tush/console"
+	"github.com/scaffoldly/tush/debug"
 )
 
 // Path is where the attach endpoint is served.
@@ -106,39 +107,56 @@ func (e ExitError) Error() string {
 	return fmt.Sprintf(ExitedFormat, e.Code)
 }
 
-// Quiet the logging the streaming library inherits from kubelet, which writes
-// to stderr — the terminal the user is sitting at.
+// Put the logging the streaming library inherits from kubelet behind tush's own
+// switch, rather than letting it write to stderr — the terminal the user is
+// sitting at.
 //
-// It reports things that are not errors here. A second person opening the URL
-// while somebody is attached is contention working as intended, and refusing
-// them is the correct outcome, but it arrives as "Unhandled Error" on the
-// publisher's screen. A client that closes its tab produces a socket-receive
-// error on every normal disconnect. Neither is actionable, both are addressed
-// to whoever runs a cluster rather than whoever published a shell, and the
-// client is already told what happened over the protocol.
+// Left alone it reports things that are not errors here. One client replacing
+// another is ordinary, and a client that closes its tab produces a
+// socket-receive error on every normal disconnect; both arrive as "Unhandled
+// Error" on the publisher's screen. Neither is actionable, and both are
+// addressed to whoever runs a cluster rather than whoever published a shell.
 //
-// Real failures still reach the user: they travel on the error channel to the
-// client, and the ones that end a session come back through Exited.
+// It is silenced rather than discarded, though: with TUSH_DEBUG set it all
+// comes back, because when an attach fails for a reason tush does not
+// understand, the library is the only thing that knows what happened.
+//
+// Real failures reach the user either way: they travel on the error channel to
+// the client, and the ones that end a session come back through Exited.
 func init() {
 	var flags flag.FlagSet
 	klog.InitFlags(&flags)
 
 	// Both are needed, and the second is the one that is easy to miss:
 	// stderrthreshold sends anything at or above its level to stderr whatever
-	// logtostderr says, and it defaults to ERROR — precisely what is being
-	// silenced here. Setting only logtostderr changes nothing.
+	// logtostderr says, and it defaults to ERROR — precisely what has to stop
+	// going there directly. Setting only logtostderr changes nothing.
 	flags.Set("logtostderr", "false")
 	flags.Set("stderrthreshold", "FATAL")
 
-	// Belt to those braces: whatever klog decides to write later has nowhere
-	// to go. Nothing today depends on it.
-	klog.SetOutput(io.Discard)
+	// Without this, one error arrives three times: klog writes a message to its
+	// own severity and to every lower one, which is three separate files
+	// normally and three copies of the same line once they all share a writer.
+	flags.Set("one_output", "true")
 
-	// Errors also reach this handler rather than only klog, and the default one
-	// writes to stderr too — it is what produced the "Unhandled Error" line.
-	runtime.ErrorHandlers = []runtime.ErrorHandler{
-		func(_ context.Context, err error, msg string, keysAndValues ...any) {},
+	// With both of those closed off, this is the only way out, which is what
+	// makes the decision below a decision rather than a duplicate.
+	klog.SetOutput(streamingLog{})
+}
+
+// streamingLog is where the library's logging ends up: on the terminal when
+// debugging, and nowhere otherwise.
+//
+// The choice is made per write rather than once at startup, because whether
+// tush is debugging is read from the environment and a test can change it. An
+// init that decided this once would be untestable from the inside.
+type streamingLog struct{}
+
+func (streamingLog) Write(p []byte) (int, error) {
+	if !debug.Logging() {
+		return len(p), nil
 	}
+	return os.Stderr.Write(p)
 }
 
 // Server hands out a console over the remote command protocol.

@@ -53,36 +53,38 @@ func TestTermReachesTheShell(t *testing.T) {
 	screen.waitFor(t, "term:tush-test-term")
 }
 
-// TestSecondClientRefused checks that a client cannot attach on top of another
-// and steal half its session.
-func TestSecondClientRefused(t *testing.T) {
+// TestSecondClientTakesOver checks that a client arriving over the protocol
+// takes the console rather than being turned away, and that the one it replaced
+// is disconnected rather than left sharing it.
+func TestSecondClientTakesOver(t *testing.T) {
 	host := startHost(t)
-	attachTo(t, host)
+	first, _ := attachTo(t, host)
 
-	conn, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
-		Subprotocols: []string{"v4.channel.k8s.io"},
-	})
-	if err != nil {
-		// Refused outright is a fine way to say no.
-		return
-	}
-	defer conn.CloseNow()
-
-	// Otherwise the session must end promptly rather than sharing the console.
-	done := make(chan struct{})
+	// The first client's connection must end, since the console is no longer
+	// its own.
+	ended := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(ended)
 		for {
-			if _, _, err := conn.Read(t.Context()); err != nil {
+			if _, _, err := first.Read(t.Context()); err != nil {
 				return
 			}
 		}
 	}()
+
+	second, screen := attachTo(t, host)
+	defer second.CloseNow()
+
 	select {
-	case <-done:
+	case <-ended:
 	case <-time.After(5 * time.Second):
-		t.Error("second client was left attached alongside the first")
+		t.Error("the first client was left attached alongside the second")
 	}
+
+	// And the newcomer has a working session rather than a socket that was
+	// accepted and then abandoned.
+	send(t, second, channelStdin, []byte("echo too''kover\n"))
+	screen.waitFor(t, "tookover")
 }
 
 // TestReleasesAfterAbruptDisconnect checks that a client which vanishes without
@@ -122,16 +124,15 @@ func TestReleasesAfterAbruptDisconnect(t *testing.T) {
 	}
 }
 
-// TestRefusalIsQuiet checks that turning a second client away writes nothing to
-// the terminal the publisher is sitting at.
+// TestTakeoverIsQuiet checks that one client replacing another writes nothing
+// to the terminal the publisher is sitting at.
 //
 // The streaming library is kubelet's, and logs the way kubelet does: to stderr,
-// addressed to whoever runs a cluster. Here that is somebody's shell. A second
-// person opening the URL while one is attached is contention working correctly,
-// and it arrived on the publisher's screen as "Unhandled Error" followed by a
-// socket-receive error — for an outcome that is not an error and that the
-// client is already told about over the protocol.
-func TestRefusalIsQuiet(t *testing.T) {
+// addressed to whoever runs a cluster. Here that is somebody's shell. Somebody
+// else opening the URL is ordinary, and it arrived on the publisher's screen as
+// "Unhandled Error" followed by a socket-receive error — for an outcome that is
+// not an error and that the client is already told about over the protocol.
+func TestTakeoverIsQuiet(t *testing.T) {
 	host := startHost(t)
 
 	first, _ := attachTo(t, host)
@@ -144,21 +145,67 @@ func TestRefusalIsQuiet(t *testing.T) {
 		second, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
 			Subprotocols: []string{"v4.channel.k8s.io"},
 		})
-		if err == nil {
-			// Read until the far end gives up on us, which is when the refusal
-			// has been fully processed and anything it logs has been written.
+		if err != nil {
+			t.Errorf("the newcomer could not connect: %v", err)
+			return
+		}
+		// Drain the first client, whose connection is now being torn down;
+		// whatever that logs is written while this is happening.
+		go func() {
 			for {
-				if _, _, err := second.Read(t.Context()); err != nil {
-					break
+				if _, _, err := first.Read(t.Context()); err != nil {
+					return
 				}
 			}
-			second.CloseNow()
-		}
+		}()
+		time.Sleep(500 * time.Millisecond)
+		second.CloseNow()
 		time.Sleep(300 * time.Millisecond)
 	})
 
 	if said != "" {
-		t.Errorf("refusing a second client wrote to the publisher's terminal:\n%s", said)
+		t.Errorf("replacing a client wrote to the publisher's terminal:\n%s", said)
+	}
+}
+
+// TestDebugSurfacesTheStreamingLibrary is the other half of the test above: the
+// library's logging is silenced by default, not thrown away, and TUSH_DEBUG
+// brings it back.
+//
+// It is worth having both directions. Silencing a library is easy to do so
+// thoroughly that nothing can turn it back on, and the moment that matters is
+// an attach failing for a reason tush has no words for — when the library is
+// the only thing that knows what went wrong.
+func TestDebugSurfacesTheStreamingLibrary(t *testing.T) {
+	t.Setenv("TUSH_DEBUG", "1")
+
+	host := startHost(t)
+	first, _ := attachTo(t, host)
+	defer first.CloseNow()
+	time.Sleep(300 * time.Millisecond)
+
+	said := captureStderr(t, func() {
+		second, _, err := websocket.Dial(t.Context(), host, &websocket.DialOptions{
+			Subprotocols: []string{"v4.channel.k8s.io"},
+		})
+		if err != nil {
+			t.Errorf("the newcomer could not connect: %v", err)
+			return
+		}
+		go func() {
+			for {
+				if _, _, err := first.Read(t.Context()); err != nil {
+					return
+				}
+			}
+		}()
+		time.Sleep(500 * time.Millisecond)
+		second.CloseNow()
+		time.Sleep(300 * time.Millisecond)
+	})
+
+	if said == "" {
+		t.Error("TUSH_DEBUG is set but the streaming library said nothing; its logging has been silenced beyond recovery")
 	}
 }
 

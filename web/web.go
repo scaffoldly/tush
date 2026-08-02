@@ -264,7 +264,7 @@ type config struct {
 	Subprotocol      string   `json:"subprotocol"`
 	Channels         channels `json:"channels"`
 	KeepAliveSeconds int      `json:"keepAliveSeconds"`
-	Busy             string   `json:"busy"`
+	Evicted          string   `json:"evicted"`
 	Detach           detach   `json:"detach"`
 	Stop             string   `json:"stop"`
 }
@@ -304,11 +304,11 @@ func settings() config {
 			Resize: attach.ChannelResize,
 		},
 		KeepAliveSeconds: int(attach.KeepAlive.Seconds()),
-		// So the page can tell "somebody else is attached" — worth retrying —
-		// from a failure that is not.
-		Busy:   console.ErrBusy.Error(),
-		Detach: detach{Prefix: attach.DetachPrefix, Suffix: attach.DetachSuffix},
-		Stop:   StopPath,
+		// So the page can tell being replaced by another client, which is
+		// ordinary, from a failure, which is not.
+		Evicted: console.ErrEvicted.Error(),
+		Detach:  detach{Prefix: attach.DetachPrefix, Suffix: attach.DetachSuffix},
+		Stop:    StopPath,
 	}
 }
 
