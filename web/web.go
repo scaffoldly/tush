@@ -151,11 +151,23 @@ func serveAsset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	harden(w)
-	// Static and carrying nothing about the session, so unlike the page it is
-	// worth caching.
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Cache-Control", cacheability())
 	w.Header().Set("Content-Type", contentType(name))
 	w.Write(body)
+}
+
+// cacheability decides how long an asset may be kept.
+//
+// Normally a good while: these carry nothing about the session, so unlike the
+// page they are worth caching. But when the page is being served from a
+// directory the whole point is that editing a file and refreshing shows the
+// change, and a cached copy defeats exactly that — an edit appears to do
+// nothing, which reads as the change being wrong rather than unfetched.
+func cacheability() string {
+	if debug.WebDir() != "" {
+		return "no-store"
+	}
+	return "public, max-age=3600"
 }
 
 // contentType names the type explicitly rather than leaving it to be sniffed
@@ -205,6 +217,22 @@ func harden(w http.ResponseWriter) {
 // by writing inline styles. No inline script exists, which is why the page
 // hands its configuration to JavaScript as JSON in a non-executable block
 // rather than as a script tag.
+//
+// Opening devtools on this page shows CSP errors. All of them are the policy
+// working, and none should be silenced by widening it:
+//
+//   - Two are the .map files the CDN's scripts point at. Only devtools fetches
+//     a source map, so nothing a user does is affected, and the fix would be to
+//     add the CDN to connect-src — the one directive holding the session in.
+//
+//   - One is an analytics beacon that the tunnel's edge injects into the HTML
+//     on its way through. It appears only over a real tunnel, never locally,
+//     which is worth knowing: this page is served through infrastructure that
+//     adds script to it, and a page that grants a shell should not also be
+//     running a third party's telemetry. Blocking it is the entire point.
+//
+// The last one is the reason to be suspicious of any request to relax
+// script-src. What it turns away is not hypothetical.
 func policy() string {
 	return strings.Join([]string{
 		"default-src 'none'",

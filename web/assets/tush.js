@@ -340,7 +340,7 @@
         return;
       }
 
-      offer(reason || "The connection closed.");
+      offer(humanise(reason) || "The connection closed.");
     };
 
     ws.onerror = function () {
@@ -383,6 +383,25 @@
 
   function isBusy(reason) {
     return reason !== null && reason.indexOf(config.busy) !== -1;
+  }
+
+  // humanise turns what the protocol says into something worth reading.
+  //
+  // The wire format is kubelet's, and it describes the world as kubelet sees
+  // it. A second person opening the URL was being told "Internal error
+  // occurred: error attaching to container: console already has a client
+  // attached" — which is not an internal error, has no container in it, and
+  // buries the one fact that matters.
+  function humanise(reason) {
+    if (reason === null) {
+      return null;
+    }
+    if (isBusy(reason)) {
+      return "Somebody else is attached to this shell. Only one at a time.";
+    }
+    // Whatever else it says, it is not an internal error from where the reader
+    // is sitting.
+    return reason.replace(/^Internal error occurred:\s*/, "");
   }
 
   // offer puts the card back with what happened, so a session that ended is

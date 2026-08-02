@@ -334,21 +334,25 @@ real tunnel: it writes lines and changes nothing. It is what distinguishes "the
 browser never fetched the emulator" from "it fetched it and the WebSocket
 failed", which is otherwise guesswork.
 
-**`TUSH_LISTEN=<addr>`** — also serve on that address, printed next to the
-tunnel URL. Naming the address is the opt-in and there is no default, because
-the premise of `tush` is that a shell is reachable only through a URL somebody
-chose to hand out, and a listener that appeared by default would quietly add a
-second way in. Failing to bind is reported and not fatal — the tunnel is the
-real path and must still come up.
-
 **`TUSH_WEB_DIR=<dir>`** — read the page from that directory instead of from
 the binary, so editing `index.html` or `tush.js` and refreshing the browser is
-the whole loop. The directory is opened as an `os.Root`, which a name
+the whole loop. It also switches assets to `no-store`, because a cached copy
+makes an edit look like it did nothing, which reads as the change being wrong
+rather than unfetched. The directory is opened as an `os.Root`, which a name
 containing `..` or a symlink pointing outward cannot escape; the names come
 from a URL, so making that impossible by construction beats checking the string
 carefully.
 
-`make dev` sets all three. `make run` stays as it was.
+`make dev` sets both. `make run` stays as it was.
+
+**There is no local listener.** An earlier version served the page on
+`127.0.0.1:8080` alongside the tunnel, to save a round trip while working on
+the page. It was removed: the tunnel is the path a session actually takes, and
+testing past it tests something no user does. It also misled in practice — a
+stale process holding the port meant a later run silently served only the
+tunnel while the local address answered from an old binary, so a change under
+test appeared not to have taken effect. Serving locally belongs to the tunnel
+library instead, as an `Offline()` option on its builder.
 
 `make web-sri` refetches each pinned CDN URL and checks that the recorded hash
 still matches, and logs the hash it found so a version bump can be recorded. It

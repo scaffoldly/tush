@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -120,8 +119,6 @@ func host(ctx context.Context, bin string) int {
 		server.Close()
 	}()
 
-	local := serveLocally(server)
-
 	// A hostname is minted before the edge routes to it, so a URL handed over
 	// the moment it exists is one the first client may fail to reach. Wait for
 	// the round trip to land here before calling it ready.
@@ -133,9 +130,6 @@ func host(ctx context.Context, bin string) int {
 	fmt.Fprintf(os.Stderr, "Attach from another machine with:\n\n")
 	fmt.Fprintf(os.Stderr, "    %s %s\n\n", bin, address)
 	fmt.Fprintf(os.Stderr, "or open that URL in a browser.\n")
-	if local != "" {
-		fmt.Fprintf(os.Stderr, "Locally, the same page is at %s\n", local)
-	}
 	if !routed {
 		fmt.Fprintf(os.Stderr, "The tunnel is not answering yet; it may need another moment.\n")
 	}
@@ -170,33 +164,6 @@ func routes(srv *attach.Server, stop func()) http.Handler {
 	mux.Handle(attach.Path, srv.Handler())
 	mux.Handle("/", web.Handler(stop))
 	return mux
-}
-
-// serveLocally opens a second listener onto the same handler when one has been
-// asked for, and reports where, or an empty string if none is running.
-//
-// Reaching the page without a tunnel round trip is what makes the browser side
-// workable to develop: the tunnel stays up and remains the real path, but a
-// stylesheet does not need one to look at. It is off unless an address is
-// named, because the whole point of tush is that a shell is reachable only
-// through a URL somebody chose to hand out, and a listener that appeared by
-// default would quietly add a second way in.
-func serveLocally(server *http.Server) string {
-	addr := debug.Listen()
-	if addr == "" {
-		return ""
-	}
-
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		// Not fatal. The tunnel is what actually matters, and losing a
-		// convenience should not stop a session from being published.
-		fmt.Fprintf(os.Stderr, "tush: not listening on %s: %v\n", addr, err)
-		return ""
-	}
-
-	go server.Serve(ln)
-	return "http://" + ln.Addr().String() + "/"
 }
 
 // logged reports what was asked for, when logging is on. Without it, a page

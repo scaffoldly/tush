@@ -1,4 +1,4 @@
-.PHONY: all check fmt fmt-check vet build test e2e binary dist run dev web-sri clean
+.PHONY: all check fmt fmt-check vet build test e2e binary dist run dev dev-start dev-stop dev-log dev-url web-sri clean
 
 # tush is pure Go. Forcing CGO off keeps every build identical across hosts and
 # makes the binary static and dependency-free, so it can be dropped into a
@@ -18,6 +18,12 @@ BINARY = tush
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GO_LDFLAGS = -s -w -X main.version=$(VERSION)
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+
+# Where `make dev-start` keeps its log and process id, and how long it waits for
+# the tunnel to start routing. Both files are gitignored.
+DEV_LOG = .dev.log
+DEV_PID = .dev.pid
+DEV_TIMEOUT = 60
 
 # Default: everything CI runs except the auto-bump release step.
 all: fmt-check vet build test e2e
@@ -78,17 +84,51 @@ run:
 	go run .
 
 # The same, set up for working on the browser page: the page is read from web/
-# rather than from the embed, so edit-refresh-look needs no rebuild; it is also
-# served on localhost, so looking at it needs no tunnel round trip; and requests
-# are logged, so a page that does not work says which half failed.
+# rather than from the embed, so edit-refresh-look needs no rebuild, and
+# requests are logged, so a page that does not work says which half failed.
 #
-# The three are separate variables rather than one because only this combination
-# wants all of them. TUSH_DEBUG alone is worth setting against a real tunnel.
+# Everything still goes through the tunnel. There is no local shortcut on
+# purpose: the tunnel is the path a session actually takes, and testing past it
+# tests something no user does.
 dev: export TUSH_DEBUG = 1
-dev: export TUSH_LISTEN = 127.0.0.1:8080
 dev: export TUSH_WEB_DIR = web
 dev:
 	go run .
+
+# The same session, in the background, for when something else has to drive the
+# browser while it runs.
+#
+# It runs the built binary rather than `go run .` on purpose. `go run` is a
+# parent that execs the real program, so killing what you started leaves the
+# actual server behind — which is how a stale process ends up holding a port
+# and answering with an older build long after you thought you had stopped it.
+# One binary means one pid, and $(DEV_PID) is that pid.
+dev-start: export TUSH_DEBUG = 1
+dev-start: export TUSH_WEB_DIR = web
+dev-start: binary
+	@$(MAKE) --no-print-directory dev-stop
+	@$(CURDIR)/$(BINARY) > $(DEV_LOG) 2>&1 & echo $$! > $(DEV_PID)
+	@for i in $$(seq 1 $(DEV_TIMEOUT)); do \
+		grep -q "Press Ctrl+C" $(DEV_LOG) 2>/dev/null && break; \
+		sleep 1; \
+	done
+	@grep -E "tunneled\.pizza" $(DEV_LOG) \
+		|| { echo "did not come up within $(DEV_TIMEOUT)s; see $(DEV_LOG)"; exit 1; }
+
+# Stop it, and sweep up anything left from an earlier run. The sweep matches
+# this checkout's binary by absolute path, so it cannot reach another project's.
+dev-stop:
+	@if [ -f $(DEV_PID) ]; then kill $$(cat $(DEV_PID)) 2>/dev/null || true; rm -f $(DEV_PID); fi
+	@pkill -f "^$(CURDIR)/$(BINARY)$$" 2>/dev/null || true
+
+# What the background session has been asked for, and what it said.
+dev-log:
+	@tail -n $(or $(N),40) $(DEV_LOG) 2>/dev/null || echo "no $(DEV_LOG); run make dev-start"
+
+# Just the URL, for pasting or scripting.
+dev-url:
+	@grep -oE 'https://[a-z0-9]+\.tunneled\.pizza/' $(DEV_LOG) 2>/dev/null | head -1 \
+		|| { echo "no URL in $(DEV_LOG); run make dev-start"; exit 1; }
 
 # Check that the third-party assets the browser page loads still hash to what
 # web/assets.go records, and print the hash for each so a version bump can be
@@ -101,5 +141,5 @@ dev:
 web-sri:
 	TUSH_SRI=1 go test -count=1 -v -run TestAssetHashesStillMatch ./web
 
-clean:
-	rm -rf dist $(BINARY)
+clean: dev-stop
+	rm -rf dist $(BINARY) $(DEV_LOG) $(DEV_PID)

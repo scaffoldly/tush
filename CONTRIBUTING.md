@@ -86,24 +86,42 @@ make test       # unit tests
 make binary     # a stamped ./tush to run by hand
 make dist       # cross-compiled release artifacts + SHA256SUMS
 make dev        # publish a tunnel, set up for working on the browser page
+make dev-start  # the same, in the background; prints the URL
+make dev-stop   # stop it
+make dev-log    # what it has been asked for (N=200 for more)
+make dev-url    # just the URL
 make web-sri    # check the pinned CDN assets against their recorded hashes
 ```
 
 ### Working on the browser page
 
-`make dev` sets three variables, which exist separately because only that
-combination wants all of them:
+`make dev` sets two variables, which are separate because only that combination
+wants both:
 
-| Variable            | Effect                                                     |
-| ------------------- | ---------------------------------------------------------- |
-| `TUSH_DEBUG`        | log each request to stderr                                  |
-| `TUSH_LISTEN=<addr>` | also serve on that address, printed beside the tunnel URL   |
-| `TUSH_WEB_DIR=<dir>` | read the page from there instead of from the binary         |
+| Variable             | Effect                                              |
+| -------------------- | --------------------------------------------------- |
+| `TUSH_DEBUG`         | log each request to stderr                           |
+| `TUSH_WEB_DIR=<dir>` | read the page from there instead of from the binary  |
 
-`TUSH_WEB_DIR` is what makes the loop edit, refresh, look with no rebuild.
-`TUSH_DEBUG` is worth setting on its own against a real tunnel; the other two
-are not, which is why it does not imply them. `TUSH_LISTEN` has no default on
-purpose — a listener nobody asked for is a second way into a shell.
+`TUSH_WEB_DIR` is what makes the loop edit, refresh, look with no rebuild, and
+it also switches assets to `no-store` — a cached copy makes an edit look like it
+did nothing, which reads as the change being wrong rather than unfetched.
+`TUSH_DEBUG` is worth setting on its own against a real tunnel, which is why it
+does not imply the other.
+
+**Everything goes through the tunnel.** There is deliberately no way to serve on
+a local port: the tunnel is the path a session actually takes, and testing past
+it tests something no user does. Serving locally belongs to the tunnel library —
+see [cnuss/libtunnel#121](https://github.com/cnuss/libtunnel/issues/121).
+
+When something else has to drive the browser while the session runs, use
+`make dev-start` rather than backgrounding `go run .` yourself. It runs the
+built binary, and that is the point: **`go run` is a parent that execs the real
+program**, so killing what you started leaves the server behind. That is how a
+stale process ends up holding a port and answering with an older build long
+after you believed you had stopped it — which has already cost an afternoon
+here, with a change under test appearing to do nothing. One binary, one pid in
+`.dev.pid`, and `make dev-stop` also sweeps up strays from earlier runs.
 
 `make web-sri` refetches each pinned asset and checks it still hashes to what
 [`web/assets.go`](./web/assets.go) records, logging what it found so a version
@@ -204,6 +222,13 @@ Two things must hold, and **neither fails visibly**:
 behind it, because what protects the user is what reaches the browser. Note that
 `html/template` escapes the `+` in a base64 hash to `&#43;`; browsers decode
 attribute values, so this is correct, and the test decodes the same way.
+
+Related, and the reason to distrust any request to relax `script-src`: over a
+real tunnel the edge **injects an analytics beacon** into the HTML on its way
+through, and the policy blocks it. It never appears locally. This page is served
+through infrastructure that adds script to it, and a page that grants a shell
+should not also run a third party's telemetry. The console errors you see in
+devtools — that beacon, and the CDN's source maps — are all the policy working.
 
 ### Ending a session takes a POST, and that is the whole guard
 
