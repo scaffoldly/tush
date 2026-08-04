@@ -17,6 +17,20 @@ import (
 // than the usual memorable adjective-animal pair.
 const opaqueHeader, opaqueValue = "X-Opaque", "true"
 
+// edge is where the connector dials to reach the tunnel edge, instead of
+// discovering it and landing on port 7844.
+//
+// 7844 is blocked on a great many networks — hotel and guest wifi, corporate
+// egress filters, CI runners — and the whole point of tush is publishing a
+// shell from wherever you happen to be. This is a relay on 443, which goes
+// through anything that lets HTTPS out.
+//
+// It costs nothing in confidentiality: the connector's TLS to the edge is
+// end-to-end against a fixed server name, so a relay that does not terminate
+// TLS cannot read what passes through it, and neither the tunnel nor its
+// credentials change.
+const edge = "relay.tunnel.pizza:443"
+
 type Tunnel struct {
 	tun libtunnel.TunnelV1
 }
@@ -25,7 +39,8 @@ func New(ctx context.Context, provider string) *Tunnel {
 	tun := libtunnel.New(
 		libtunnel.Cloudflare().
 			WithProvider(provider).
-			WithHeader(opaqueHeader, opaqueValue)).
+			WithHeader(opaqueHeader, opaqueValue).
+			WithEdge(edge)).
 		WithContext(ctx)
 
 	// Publishing a tunnel is the one part of a session that depends on somebody
