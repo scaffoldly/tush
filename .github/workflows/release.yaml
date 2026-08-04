@@ -256,4 +256,28 @@ jobs:
           for package in dist/npm/tush-*; do
             publish "$package"
           done
+
+          # Wait for each of them to be resolvable before publishing the wrapper.
+          #
+          # An optional dependency that cannot be fetched is skipped rather than
+          # failed — that is what optional means — so a wrapper published while
+          # its platform packages are still propagating installs perfectly
+          # cleanly and then cannot find its binary. That is what happened on
+          # 0.0.4: `npx` a minute after the release reported no binary for this
+          # platform, and the same command worked later with nothing changed.
+          for package in dist/npm/tush-*; do
+            name=$(node -p "require('./$package/package.json').name")
+            for attempt in $(seq 1 30); do
+              if npm view "${name}@${VERSION#v}" version >/dev/null 2>&1; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                echo "::error::${name}@${VERSION#v} did not become resolvable; not publishing the wrapper"
+                exit 1
+              fi
+              echo "waiting for ${name}@${VERSION#v} (${attempt})"
+              sleep 10
+            done
+          done
+
           publish dist/npm/tush
