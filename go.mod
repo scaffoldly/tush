@@ -87,6 +87,6 @@ require (
 )
 
 require (
-	github.com/cnuss/libtunnel v0.0.42
+	github.com/cnuss/libtunnel v0.0.43
 	golang.org/x/sys v0.47.0 // indirect
 )
