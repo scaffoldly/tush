@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,6 +241,39 @@ func captureStderr(t *testing.T, f func()) string {
 	out := <-read
 	r.Close()
 	return out
+}
+
+// TestDescribesItselfBeforeAnyClient checks that a server can say what it is
+// before anything has connected to it.
+//
+// The published address is printed the moment the tunnel is up, which is long
+// before a client arrives — and the shell deliberately does not start until one
+// does, so that it inherits that client's terminal type. Anything answered from
+// the shell would be answered from nothing at that point.
+func TestDescribesItselfBeforeAnyClient(t *testing.T) {
+	var started atomic.Bool
+	server := New(nil, func(string) (<-chan int, error) {
+		started.Store(true)
+		return make(chan int, 1), nil
+	}).WithCommand("/bin/zsh")
+
+	if got, want := server.PID(), strconv.Itoa(os.Getpid()); got != want {
+		t.Errorf("PID() = %q, want this process %q", got, want)
+	}
+	if got := server.CMD(); got != "/bin/zsh" {
+		t.Errorf("CMD() = %q, want the command it will serve", got)
+	}
+	if started.Load() {
+		t.Error("describing the server started a shell; it must not run until somebody attaches")
+	}
+}
+
+// TestDescribesAnUnsetCommand checks the unset case reads as something rather
+// than as an empty pair of brackets, since this goes straight into a sentence.
+func TestDescribesAnUnsetCommand(t *testing.T) {
+	if got := New(nil, nil).CMD(); got == "" {
+		t.Error("CMD() is empty, which prints as () in the line that reports it")
+	}
 }
 
 // startHost runs a console, a shell on it, and the attach endpoint, returning

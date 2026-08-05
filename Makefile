@@ -91,6 +91,7 @@ run:
 # purpose: the tunnel is the path a session actually takes, and testing past it
 # tests something no user does.
 dev: export TUSH_DEBUG = 1
+dev: export LIBTUNNEL_LOG = debug
 dev: export TUSH_WEB_DIR = web
 dev:
 	go run .

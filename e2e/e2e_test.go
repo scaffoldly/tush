@@ -131,9 +131,11 @@ func publish(t *testing.T) *url.URL {
 		}
 	})
 
-	raw, err := tun.URL()
-	if err != nil {
-		t.Fatalf("could not publish a tunnel: %v", err)
+	// An empty address means the tunnel ended before it ever became reachable;
+	// the channel carries no error of its own.
+	raw := <-tun.URL()
+	if raw == "" {
+		t.Fatal("the tunnel closed before it was reachable")
 	}
 	t.Logf("published at %s", raw)
 	u, err := url.Parse(raw)

@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -88,25 +87,28 @@ func (t *Tunnel) Listener() net.Listener {
 // tunnel fails to come up. Selecting on Done alongside readiness is the shape
 // the library's own example shows, and turns that into something a user can
 // read.
-func (t *Tunnel) URL() (string, error) {
-	select {
-	case <-t.tun.TunnelReady():
-	case <-t.tun.Done():
-		return "", t.failure()
-	}
-
-	u := t.tun.URL()
-	if u == nil {
-		return "", t.failure()
-	}
-	return u.String(), nil
+func (t *Tunnel) URL() <-chan string {
+	u := make(chan string, 1)
+	go func() {
+		select {
+		case <-t.tun.HostnameReady():
+			u <- t.tun.URL().String()
+		case <-t.tun.Done():
+			u <- ""
+		}
+	}()
+	return u
 }
 
-// failure explains why the tunnel ended. It reports something even when the
-// library has nothing to add, since an empty error reads as success.
-func (t *Tunnel) failure() error {
-	if err := t.tun.Err(); err != nil {
-		return err
-	}
-	return errors.New("the tunnel closed before it was reachable")
+func (t *Tunnel) Hostname() <-chan string {
+	hostname := make(chan string, 1)
+	go func() {
+		select {
+		case <-t.tun.HostnameReady():
+			hostname <- t.tun.Hostname()
+		case <-t.tun.Done():
+			hostname <- ""
+		}
+	}()
+	return hostname
 }

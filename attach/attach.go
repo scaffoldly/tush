@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -163,6 +164,7 @@ func (streamingLog) Write(p []byte) (int, error) {
 type Server struct {
 	console *console.Console
 	start   Starter
+	command string
 
 	mu     sync.Mutex
 	status <-chan int
@@ -184,6 +186,35 @@ func New(c *console.Console, start Starter) *Server {
 // shell.
 func (s *Server) Exited() <-chan int {
 	return s.exited
+}
+
+// WithCommand records what this server puts on the console, for CMD to report.
+//
+// The server is handed a Starter rather than a command, so that it never has to
+// know what a shell is. This is the one thing about it worth saying out loud,
+// and it is said rather than discovered.
+func (s *Server) WithCommand(command string) *Server {
+	s.command = command
+	return s
+}
+
+// PID is the process a published URL reaches. That is this one: tush holds the
+// console and serves it, and every client arrives here.
+//
+// Not the shell's. The shell does not exist yet when this is first worth
+// printing — it starts with the first client, so that it inherits that client's
+// terminal type — and a session outlives any one shell in any case.
+func (s *Server) PID() string {
+	return strconv.Itoa(os.Getpid())
+}
+
+// CMD is what a client will land in. It is known before it runs, because the
+// shell is chosen when tush starts and only started when somebody arrives.
+func (s *Server) CMD() string {
+	if s.command == "" {
+		return "unknown"
+	}
+	return s.command
 }
 
 // Handler serves the attach endpoint. It is the endpoint alone rather than
